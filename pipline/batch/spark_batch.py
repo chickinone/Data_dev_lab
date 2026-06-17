@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -11,12 +12,20 @@ from pyspark.sql import functions as F
 
 JOB_NAME = os.getenv("BATCH_JOB_NAME", "cdc_spark_reconcile")
 
+
+def required_env(name):
+    value = os.getenv(name)
+    if value is None or value == "":
+        sys.exit(f"[spark-batch] missing required environment variable: {name}")
+    return value
+
+
 DB = dict(
-    host=os.getenv("TARGET_DB_HOST", "postgres-target"),
-    port=int(os.getenv("TARGET_DB_PORT", "5432")),
-    dbname=os.getenv("TARGET_DB_NAME", "targetdb"),
-    user=os.getenv("TARGET_DB_USER", "postgres"),
-    password=os.getenv("TARGET_DB_PASSWORD", "postgres"),
+    host=required_env("TARGET_DB_HOST"),
+    port=int(required_env("TARGET_DB_PORT")),
+    dbname=required_env("TARGET_DB_NAME"),
+    user=required_env("TARGET_DB_USER"),
+    password=required_env("TARGET_DB_PASSWORD"),
 )
 
 

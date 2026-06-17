@@ -8,12 +8,20 @@ from faker import Faker
 
 fake = Faker()
 
+
+def required_env(name):
+    value = os.getenv(name)
+    if value is None or value == "":
+        sys.exit(f"[fake-data] missing required environment variable: {name}")
+    return value
+
+
 DB = dict(
-    host=os.getenv("SOURCE_DB_HOST", "postgres-source"),
-    port=int(os.getenv("SOURCE_DB_PORT", "5432")),
-    dbname=os.getenv("SOURCE_DB_NAME", "sourcedb"),
-    user=os.getenv("SOURCE_DB_USER", "postgres"),
-    password=os.getenv("SOURCE_DB_PASSWORD", "postgres"),
+    host=required_env("SOURCE_DB_HOST"),
+    port=int(required_env("SOURCE_DB_PORT")),
+    dbname=required_env("SOURCE_DB_NAME"),
+    user=required_env("SOURCE_DB_USER"),
+    password=required_env("SOURCE_DB_PASSWORD"),
 )
 
 PRODUCTS = [
@@ -206,4 +214,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

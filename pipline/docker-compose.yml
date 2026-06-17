@@ -3,9 +3,9 @@ services:
     image: postgres:16
     container_name: postgres-source
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: sourcedb
+      POSTGRES_USER: ${SOURCE_DB_USER}
+      POSTGRES_PASSWORD: ${SOURCE_DB_PASSWORD}
+      POSTGRES_DB: ${SOURCE_DB_NAME}
     command:
       - postgres
       - -c
@@ -19,7 +19,7 @@ services:
     volumes:
       - ./source-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d sourcedb"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -28,15 +28,15 @@ services:
     image: postgres:16
     container_name: postgres-target
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: targetdb
+      POSTGRES_USER: ${TARGET_DB_USER}
+      POSTGRES_PASSWORD: ${TARGET_DB_PASSWORD}
+      POSTGRES_DB: ${TARGET_DB_NAME}
     ports:
       - "5433:5432"          
     volumes:
       - ./target-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d targetdb"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -104,8 +104,16 @@ services:
     container_name: connector-init
     depends_on:
       - connect
-    volumes:
-      - ./debezium/connector-config.json:/config.json:ro
+    environment:
+      SOURCE_DB_HOST: ${SOURCE_DB_HOST}
+      SOURCE_DB_PORT: ${SOURCE_DB_PORT}
+      SOURCE_DB_NAME: ${SOURCE_DB_NAME}
+      SOURCE_DB_USER: ${SOURCE_DB_USER}
+      SOURCE_DB_PASSWORD: ${SOURCE_DB_PASSWORD}
+      TOPIC_PREFIX: ${TOPIC_PREFIX}
+      DEBEZIUM_CONNECTOR_NAME: ${DEBEZIUM_CONNECTOR_NAME}
+      DEBEZIUM_SLOT_NAME: ${DEBEZIUM_SLOT_NAME}
+      DEBEZIUM_PUBLICATION_NAME: ${DEBEZIUM_PUBLICATION_NAME}
     entrypoint:
       - sh
       - -c
@@ -115,8 +123,36 @@ services:
           sleep 3;
         done;
         sleep 5;
+        cat > /tmp/config.json <<EOF
+        {
+          "name": "$${DEBEZIUM_CONNECTOR_NAME}",
+          "config": {
+            "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+            "tasks.max": "1",
+            "database.hostname": "$${SOURCE_DB_HOST}",
+            "database.port": "$${SOURCE_DB_PORT}",
+            "database.user": "$${SOURCE_DB_USER}",
+            "database.password": "$${SOURCE_DB_PASSWORD}",
+            "database.dbname": "$${SOURCE_DB_NAME}",
+            "topic.prefix": "$${TOPIC_PREFIX}",
+            "plugin.name": "pgoutput",
+            "slot.name": "$${DEBEZIUM_SLOT_NAME}",
+            "publication.name": "$${DEBEZIUM_PUBLICATION_NAME}",
+            "publication.autocreate.mode": "filtered",
+            "table.include.list": "public.customers,public.orders",
+            "snapshot.mode": "initial",
+            "tombstones.on.delete": "false",
+            "decimal.handling.mode": "string",
+            "time.precision.mode": "connect",
+            "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "key.converter.schemas.enable": "false",
+            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "value.converter.schemas.enable": "false"
+          }
+        }
+        EOF
         echo "Registering Debezium PostgreSQL connector...";
-        code=$$(curl -s -o /tmp/r.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data @/config.json http://connect:8083/connectors);
+        code=$$(curl -s -o /tmp/r.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data @/tmp/config.json http://connect:8083/connectors);
         echo "HTTP status: $$code (200/201 = created, 409 = already exists)";
         cat /tmp/r.json 2>/dev/null || true;
         echo;
@@ -130,12 +166,12 @@ services:
       postgres-source:
         condition: service_healthy
     environment:
-      SOURCE_DB_HOST: postgres-source
-      SOURCE_DB_PORT: "5432"
-      SOURCE_DB_NAME: sourcedb
-      SOURCE_DB_USER: postgres
-      SOURCE_DB_PASSWORD: postgres
-      POISON_EVENTS: "4"
+      SOURCE_DB_HOST: ${SOURCE_DB_HOST}
+      SOURCE_DB_PORT: ${SOURCE_DB_PORT}
+      SOURCE_DB_NAME: ${SOURCE_DB_NAME}
+      SOURCE_DB_USER: ${SOURCE_DB_USER}
+      SOURCE_DB_PASSWORD: ${SOURCE_DB_PASSWORD}
+      POISON_EVENTS: ${POISON_EVENTS}
     restart: "no"
 
   consumer:
@@ -147,15 +183,15 @@ services:
       kafka:
         condition: service_started
     environment:
-      KAFKA_BOOTSTRAP: kafka:29092
-      TOPIC_PREFIX: dbserver1
-      TARGET_DB_HOST: postgres-target
-      TARGET_DB_PORT: "5432"
-      TARGET_DB_NAME: targetdb
-      TARGET_DB_USER: postgres
-      TARGET_DB_PASSWORD: postgres
-      DLQ_TOPIC: cdc.failed_events
-      MAX_RETRIES: "3"
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
+      TOPIC_PREFIX: ${TOPIC_PREFIX}
+      TARGET_DB_HOST: ${TARGET_DB_HOST}
+      TARGET_DB_PORT: ${TARGET_DB_PORT}
+      TARGET_DB_NAME: ${TARGET_DB_NAME}
+      TARGET_DB_USER: ${TARGET_DB_USER}
+      TARGET_DB_PASSWORD: ${TARGET_DB_PASSWORD}
+      DLQ_TOPIC: ${DLQ_TOPIC}
+      MAX_RETRIES: ${MAX_RETRIES}
     restart: unless-stopped
 
   airflow:
@@ -167,14 +203,21 @@ services:
     ports:
       - "8081:8080"
     environment:
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
-      AIRFLOW__WEBSERVER__SECRET_KEY: "change-me-airflow-secret-key-0123456789"
-      TARGET_DB_HOST: postgres-target
-      TARGET_DB_PORT: "5432"
-      TARGET_DB_NAME: targetdb
-      TARGET_DB_USER: postgres
-      TARGET_DB_PASSWORD: postgres
+      AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW_LOAD_EXAMPLES}
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: ${AIRFLOW_DAGS_ARE_PAUSED_AT_CREATION}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY}
+      AIRFLOW_ADMIN_USERNAME: ${AIRFLOW_ADMIN_USERNAME}
+      AIRFLOW_ADMIN_FIRSTNAME: ${AIRFLOW_ADMIN_FIRSTNAME}
+      AIRFLOW_ADMIN_LASTNAME: ${AIRFLOW_ADMIN_LASTNAME}
+      AIRFLOW_ADMIN_EMAIL: ${AIRFLOW_ADMIN_EMAIL}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+      BATCH_JOB_NAME: ${BATCH_JOB_NAME}
+      SPARK_MASTER: ${SPARK_MASTER}
+      TARGET_DB_HOST: ${TARGET_DB_HOST}
+      TARGET_DB_PORT: ${TARGET_DB_PORT}
+      TARGET_DB_NAME: ${TARGET_DB_NAME}
+      TARGET_DB_USER: ${TARGET_DB_USER}
+      TARGET_DB_PASSWORD: ${TARGET_DB_PASSWORD}
     volumes:
       - ./airflow/dags:/opt/airflow/dags:ro
       - ./batch:/opt/airflow/batch:ro
@@ -184,12 +227,12 @@ services:
       - |
         airflow db migrate &&
         airflow users create \
-          --username admin \
-          --firstname Admin \
-          --lastname User \
+          --username "$${AIRFLOW_ADMIN_USERNAME}" \
+          --firstname "$${AIRFLOW_ADMIN_FIRSTNAME}" \
+          --lastname "$${AIRFLOW_ADMIN_LASTNAME}" \
           --role Admin \
-          --email admin@example.com \
-          --password admin || true;
+          --email "$${AIRFLOW_ADMIN_EMAIL}" \
+          --password "$${AIRFLOW_ADMIN_PASSWORD}" || true;
         airflow scheduler &
         exec airflow webserver --port 8080
     restart: unless-stopped
@@ -202,6 +245,11 @@ services:
     ports:
       - "8088:8088"
     environment:
-      SUPERSET_SECRET_KEY: "change-me-to-a-long-random-string-0123456789abcdef"
-      TALISMAN_ENABLED: "false"
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      TALISMAN_ENABLED: ${SUPERSET_TALISMAN_ENABLED}
+      SUPERSET_ADMIN_USERNAME: ${SUPERSET_ADMIN_USERNAME}
+      SUPERSET_ADMIN_FIRSTNAME: ${SUPERSET_ADMIN_FIRSTNAME}
+      SUPERSET_ADMIN_LASTNAME: ${SUPERSET_ADMIN_LASTNAME}
+      SUPERSET_ADMIN_EMAIL: ${SUPERSET_ADMIN_EMAIL}
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
     restart: unless-stopped

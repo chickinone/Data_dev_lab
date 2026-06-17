@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 
 from airflow import DAG
@@ -20,12 +21,12 @@ with DAG(
         bash_command="python -u /opt/airflow/batch/spark_batch.py",
         append_env=True,
         env={
-            "BATCH_JOB_NAME": "cdc_spark_reconcile",
-            "SPARK_MASTER": "local[*]",
-            "TARGET_DB_HOST": "postgres-target",
-            "TARGET_DB_PORT": "5432",
-            "TARGET_DB_NAME": "targetdb",
-            "TARGET_DB_USER": "postgres",
-            "TARGET_DB_PASSWORD": "postgres",
+            "BATCH_JOB_NAME": os.environ["BATCH_JOB_NAME"],
+            "SPARK_MASTER": os.environ["SPARK_MASTER"],
+            "TARGET_DB_HOST": os.environ["TARGET_DB_HOST"],
+            "TARGET_DB_PORT": os.environ["TARGET_DB_PORT"],
+            "TARGET_DB_NAME": os.environ["TARGET_DB_NAME"],
+            "TARGET_DB_USER": os.environ["TARGET_DB_USER"],
+            "TARGET_DB_PASSWORD": os.environ["TARGET_DB_PASSWORD"],
         },
     )

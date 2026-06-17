@@ -1,19 +1,19 @@
 {
-  "name": "ecommerce-source-connector",
+  "name": "${DEBEZIUM_CONNECTOR_NAME}",
   "config": {
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "tasks.max": "1",
 
-    "database.hostname": "postgres-source",
-    "database.port": "5432",
-    "database.user": "postgres",
-    "database.password": "postgres",
-    "database.dbname": "sourcedb",
+    "database.hostname": "${SOURCE_DB_HOST}",
+    "database.port": "${SOURCE_DB_PORT}",
+    "database.user": "${SOURCE_DB_USER}",
+    "database.password": "${SOURCE_DB_PASSWORD}",
+    "database.dbname": "${SOURCE_DB_NAME}",
 
-    "topic.prefix": "dbserver1",
+    "topic.prefix": "${TOPIC_PREFIX}",
     "plugin.name": "pgoutput",
-    "slot.name": "debezium_slot",
-    "publication.name": "dbz_publication",
+    "slot.name": "${DEBEZIUM_SLOT_NAME}",
+    "publication.name": "${DEBEZIUM_PUBLICATION_NAME}",
     "publication.autocreate.mode": "filtered",
 
     "table.include.list": "public.customers,public.orders",

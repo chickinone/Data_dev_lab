@@ -43,8 +43,11 @@ Superset
 
 ```powershell
 cd d:\ICS\Task\Thang_6\Dev_data_lab\pipline
+copy .env.example .env
 docker compose up -d --build
 ```
+
+Sua cac gia tri trong `.env` truoc khi chay neu day khong phai moi truong demo local.
 
 Theo doi logs chinh:
 
@@ -239,7 +242,7 @@ Airflow UI:
 
 ```text
 http://localhost:8081
-admin / admin
+Dang nhap bang AIRFLOW_ADMIN_USERNAME / AIRFLOW_ADMIN_PASSWORD trong `.env`.
 ```
 
 Chay batch thu cong bang terminal:
@@ -321,12 +324,12 @@ Khoi tao Superset lan dau:
 
 ```powershell
 docker compose exec superset superset db upgrade
-docker compose exec superset superset fab create-admin `
-  --username admin `
-  --firstname Admin `
-  --lastname User `
-  --email admin@example.com `
-  --password admin
+docker compose exec superset sh -c 'superset fab create-admin \
+  --username "$SUPERSET_ADMIN_USERNAME" \
+  --firstname "$SUPERSET_ADMIN_FIRSTNAME" \
+  --lastname "$SUPERSET_ADMIN_LASTNAME" \
+  --email "$SUPERSET_ADMIN_EMAIL" \
+  --password "$SUPERSET_ADMIN_PASSWORD"'
 docker compose exec superset superset init
 ```
 
@@ -336,8 +339,8 @@ Khi tao database connection trong Superset, neu wizard khong cho dan URL thi nha
 HOST: postgres-target
 PORT: 5432
 DATABASE NAME: targetdb
-USERNAME: postgres
-PASSWORD: postgres
+USERNAME: TARGET_DB_USER trong `.env`
+PASSWORD: TARGET_DB_PASSWORD trong `.env`
 DISPLAY NAME: targetdb
 SSL: off
 SSH Tunnel: off

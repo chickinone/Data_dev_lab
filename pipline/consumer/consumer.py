@@ -15,12 +15,20 @@ TOPIC_PREFIX    = os.getenv("TOPIC_PREFIX",    "dbserver1")
 DLQ_TOPIC       = os.getenv("DLQ_TOPIC",       "cdc.failed_events")
 MAX_RETRIES     = int(os.getenv("MAX_RETRIES", "3"))
 
+
+def required_env(name):
+    value = os.getenv(name)
+    if value is None or value == "":
+        sys.exit(f"missing required environment variable: {name}")
+    return value
+
+
 DB = dict(
-    host     = os.getenv("TARGET_DB_HOST",     "postgres-target"),
-    port     = int(os.getenv("TARGET_DB_PORT", "5432")),
-    dbname   = os.getenv("TARGET_DB_NAME",     "targetdb"),
-    user     = os.getenv("TARGET_DB_USER",     "postgres"),
-    password = os.getenv("TARGET_DB_PASSWORD", "postgres"),
+    host     = required_env("TARGET_DB_HOST"),
+    port     = int(required_env("TARGET_DB_PORT")),
+    dbname   = required_env("TARGET_DB_NAME"),
+    user     = required_env("TARGET_DB_USER"),
+    password = required_env("TARGET_DB_PASSWORD"),
 )
 
 
@@ -29,7 +37,7 @@ def log(msg):
 
 
 def to_timestamp(value):
-    """Debezium 'connect' temporal mode → epoch millis (int).
+    """Debezium 'connect' temporal mode uses epoch millis for timestamps.
     Also tolerates ISO strings (e.g. timestamptz) and passes through None."""
     if value is None:
         return None
@@ -71,8 +79,6 @@ def transform_customer(row):
     phone = phone or None
 
     country = normalize_country(row.get("country"))
-    if country:
-        country = country.title()          
 
     return {
         "id":           row.get("id"),
@@ -178,8 +184,9 @@ def mart_update_customer(cur, op, before, after):
         return
 
     def norm(row):
-        c = clean_str((row or {}).get("country"))
-        return c.title() if c else None
+        if row is None:
+            return None
+        return normalize_country(row.get("country"))
 
     old_country = norm(before)
     new_country = norm(after)
@@ -208,7 +215,7 @@ TABLES = {
 TOPICS = [f"{TOPIC_PREFIX}.public.{t}" for t in TABLES]
 
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
+# DB helpers
 
 def connect_db():
     for attempt in range(1, 31):
@@ -319,7 +326,7 @@ def record_failed_event(conn, failed_event):
     cur.close()
 
 
-# ── Event processing ──────────────────────────────────────────────────────────
+# Event processing
 
 def process_message(conn, msg, state):
     table = msg.topic().split(".")[-1]
@@ -329,7 +336,7 @@ def process_message(conn, msg, state):
 
     raw_value = msg.value()
     if raw_value is None:
-        # tombstone — tombstones.on.delete=false should prevent these, but be safe
+        # tombstone; tombstones.on.delete=false should prevent these, but be safe
         return
 
     event   = json.loads(raw_value)
@@ -348,7 +355,7 @@ def process_message(conn, msg, state):
 
     cur = conn.cursor()
 
-    # ── 1) RAW: append event as-is ──────────────────────────────────────────
+    # 1) RAW: append event as-is
     cur.execute(
         "INSERT INTO raw.cdc_events "
         "(source_table, op, ts_ms, pk, before_data, after_data) "
@@ -361,7 +368,7 @@ def process_message(conn, msg, state):
         ),
     )
 
-    # ── 2) CLEAN: maintain current-state table ───────────────────────────────
+    # 2) CLEAN: maintain current-state table
     if op in ("c", "r", "u") and after is not None:
         cleaned = cfg["transform"](after)
         cleaned["_op"]        = op
@@ -370,7 +377,7 @@ def process_message(conn, msg, state):
     elif op == "d" and pk_val is not None:
         delete_row(cur, cfg["clean_table"], pk_col, pk_val)
 
-    # ── 3) MART: targeted UPSERT of only the affected rows ──────────────────
+    # 3) MART: targeted UPSERT of only the affected rows
     #   mart_fn calls mart.on_order_change() / mart.on_customer_change() which
     #   recalculate only the specific (order_day, country) buckets and customer
     #   summary rows touched by this event.  No TRUNCATE, no full scan.
@@ -383,7 +390,7 @@ def process_message(conn, msg, state):
     log(f"#{state['total']} {table} op={op} pk={pk_val}")
 
 
-# ── Topic availability wait ───────────────────────────────────────────────────
+# Topic availability wait
 
 def wait_for_topics(consumer, topics, total_timeout=180):
     """Block until the expected topics exist so we consume from the start."""
@@ -404,7 +411,7 @@ def wait_for_topics(consumer, topics, total_timeout=180):
         log(f"topics available: {topics}")
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
+# Main loop
 
 def main():
     conn = connect_db()
@@ -470,7 +477,7 @@ def main():
                 continue
 
     except KeyboardInterrupt:
-        log("shutting down…")
+        log("shutting down...")
     finally:
         consumer.close()
         producer.flush(5)
