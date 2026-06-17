@@ -1,0 +1,31 @@
+{
+  "name": "ecommerce-source-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+
+    "database.hostname": "postgres-source",
+    "database.port": "5432",
+    "database.user": "postgres",
+    "database.password": "postgres",
+    "database.dbname": "sourcedb",
+
+    "topic.prefix": "dbserver1",
+    "plugin.name": "pgoutput",
+    "slot.name": "debezium_slot",
+    "publication.name": "dbz_publication",
+    "publication.autocreate.mode": "filtered",
+
+    "table.include.list": "public.customers,public.orders",
+    "snapshot.mode": "initial",
+    "tombstones.on.delete": "false",
+
+    "decimal.handling.mode": "string",
+    "time.precision.mode": "connect",
+
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false"
+  }
+}
