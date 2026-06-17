@@ -86,6 +86,23 @@ CREATE TABLE IF NOT EXISTS ops.batch_runs (
     error_message              TEXT
 );
 
+CREATE TABLE IF NOT EXISTS ops.failed_events (
+    failed_event_id BIGSERIAL PRIMARY KEY,
+    source_topic    TEXT NOT NULL,
+    source_partition INT,
+    source_offset   BIGINT,
+    message_key     TEXT,
+    message_value   JSONB,
+    error_message   TEXT NOT NULL,
+    retry_count     INT NOT NULL,
+    dlq_topic       TEXT NOT NULL,
+    failed_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_failed_events_topic
+    ON ops.failed_events (source_topic);
+CREATE INDEX IF NOT EXISTS idx_failed_events_failed_at
+    ON ops.failed_events (failed_at);
+
 CREATE OR REPLACE FUNCTION mart.refresh_all()
 RETURNS void
 LANGUAGE plpgsql AS $$

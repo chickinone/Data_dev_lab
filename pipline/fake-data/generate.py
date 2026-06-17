@@ -28,6 +28,8 @@ COUNTRY_RAW = [
 ]
 
 STATUS_FLOW = ["NEW", "PAID", "SHIPPED", "DELIVERED"]
+POISON_PRODUCT = "[DLQ_TEST] Overflow Order"
+POISON_EVENTS = int(os.getenv("POISON_EVENTS", "4"))
 
 
 def connect():
@@ -96,8 +98,27 @@ def insert_order(cur):
     print(f"[fake-data] + order {oid} (customer {cid})", flush=True)
 
 
+def insert_poison_order(cur):
+    """Insert a valid source row that overflows target clean.orders.total_amount."""
+    cid = get_random_id(cur, "customers")
+    if cid is None:
+        return
+    cur.execute(
+        "INSERT INTO orders (customer_id, product_name, quantity, unit_price, status) "
+        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        (cid, POISON_PRODUCT, 2_000_000_000, 99_999_999.99, "NEW"),
+    )
+    oid = cur.fetchone()[0]
+    print(f"[fake-data] ! poison order {oid} for DLQ test (customer {cid})", flush=True)
+
+
 def update_order(cur):
-    cur.execute("SELECT id, status FROM orders ORDER BY random() LIMIT 1")
+    cur.execute(
+        "SELECT id, status FROM orders "
+        "WHERE product_name <> %s "
+        "ORDER BY random() LIMIT 1",
+        (POISON_PRODUCT,),
+    )
     row = cur.fetchone()
     if not row:
         return
@@ -126,15 +147,23 @@ def update_customer(cur):
 
 
 def delete_order(cur):
-    oid = get_random_id(cur, "orders")
-    if oid is None:
+    cur.execute(
+        "SELECT id FROM orders "
+        "WHERE product_name <> %s "
+        "ORDER BY random() LIMIT 1",
+        (POISON_PRODUCT,),
+    )
+    row = cur.fetchone()
+    if not row:
         return
+    oid = row[0]
     cur.execute("DELETE FROM orders WHERE id = %s", (oid,))
     print(f"[fake-data] - order {oid}", flush=True)
 
 
 def main():
-    end_time = time.time() + 60 * 5  
+    start_time = time.time()
+    end_time = start_time + 60 * 5
     conn = connect()
     cur = conn.cursor()
 
@@ -152,11 +181,20 @@ def main():
     ]
     fns = [a for a, _ in actions]
     weights = [w for _, w in actions]
+    poison_at = [
+        start_time + ((i + 1) * ((end_time - start_time) / (POISON_EVENTS + 1)))
+        for i in range(POISON_EVENTS)
+    ]
 
     print("[fake-data] generating change events... (stop with Ctrl+C / docker stop)", flush=True)
 
     while time.time() < end_time: 
-        fn = random.choices(fns, weights=weights, k=1)[0]
+        now = time.time()
+        if poison_at and now >= poison_at[0]:
+            fn = insert_poison_order
+            poison_at.pop(0)
+        else:
+            fn = random.choices(fns, weights=weights, k=1)[0]
         try:
             fn(cur)
         except Exception as exc:
@@ -168,5 +206,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

@@ -163,6 +163,19 @@ Routing theo Debezium `op`:
 - `d`: delete khoi clean.
 - moi event deu append vao raw.
 
+Neu xu ly event loi, consumer se retry theo cau hinh:
+
+```text
+MAX_RETRIES=3
+DLQ_TOPIC=cdc.failed_events
+```
+
+Sau khi qua so lan retry, event loi duoc:
+
+1. Publish sang Kafka topic `cdc.failed_events`.
+2. Ghi metadata loi vao `ops.failed_events`.
+3. Commit Kafka offset de consumer khong bi ket mai o mot bad event.
+
 ## 5. Mart Logic
 
 `mart.daily_revenue` tong hop theo:
@@ -247,7 +260,56 @@ Status co the gap:
 - `SUCCESS_WITH_WARNINGS`: batch chay xong nhung co issue, vi du `UNKNOWN` country hoac order khong join duoc customer.
 - `FAILED`: batch loi.
 
-## 7. Superset Dashboard
+## 7. SQL Queue / Dead Letter Queue
+
+Pipeline SQL hien dung Kafka lam queue chinh cho CDC topics:
+
+```text
+dbserver1.public.customers
+dbserver1.public.orders
+```
+
+Them vao do la dead-letter queue:
+
+```text
+cdc.failed_events
+```
+
+Topic nay nhan cac CDC event ma `consumer.py` khong xu ly duoc sau `MAX_RETRIES`.
+
+Fake-data mac dinh tao 4 poison orders trong 5 phut de test DLQ:
+
+```text
+POISON_EVENTS=4
+product_name=[DLQ_TEST] Overflow Order
+```
+
+Nhung order nay hop le o source DB, nhung co `quantity * unit_price` qua lon nen khi consumer ghi vao
+`clean.orders.total_amount NUMERIC(14,2)` se loi numeric overflow. Consumer retry roi dua event vao DLQ.
+
+Kiem tra topic:
+
+```powershell
+docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --list
+```
+
+Doc failed events tu Kafka:
+
+```powershell
+docker compose exec kafka kafka-console-consumer `
+  --bootstrap-server kafka:29092 `
+  --topic cdc.failed_events `
+  --from-beginning `
+  --max-messages 5
+```
+
+Kiem tra failed events trong target DB:
+
+```powershell
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT failed_event_id, source_topic, source_offset, retry_count, error_message, failed_at FROM ops.failed_events ORDER BY failed_event_id DESC LIMIT 20;"
+```
+
+## 8. Superset Dashboard
 
 Mo Superset:
 
@@ -301,7 +363,7 @@ Chart goi y cho batch monitoring:
 - Batch run history table tu `ops.batch_runs`
 - Data-quality issue count tu `ops.batch_runs.dq_issue_count`
 
-## 8. Data Quality Queries
+## 9. Data Quality Queries
 
 Customer thieu country:
 
@@ -327,11 +389,18 @@ Reconcile mart thu cong:
 docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT mart.refresh_all();"
 ```
 
-## 9. Chay Lai Fake Data
+## 10. Chay Lai Fake Data
 
 ```powershell
 docker compose up -d --build --force-recreate fake-data
 docker compose logs -f fake-data
+```
+
+Mac dinh `fake-data` tao 4 event loi co chu dich trong 5 phut de test `cdc.failed_events`.
+Neu khong muon tao poison events, set:
+
+```yaml
+POISON_EVENTS: "0"
 ```
 
 Theo doi consumer:
@@ -340,7 +409,7 @@ Theo doi consumer:
 docker compose logs -f consumer
 ```
 
-## 10. Dung / Don Dep
+## 11. Dung / Don Dep
 
 Dung services, giu du lieu container:
 
@@ -356,7 +425,7 @@ docker compose down -v
 
 Lenh `down -v` se xoa du lieu DB va replication slot, dung khi muon lam lai tu dau.
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 Connector khong `RUNNING`:
 

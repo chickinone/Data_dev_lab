@@ -8,10 +8,12 @@ from datetime import datetime, timezone
 
 import psycopg2
 from psycopg2.extras import Json
-from confluent_kafka import Consumer, KafkaError
+from confluent_kafka import Consumer, KafkaError, Producer, TopicPartition
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
 TOPIC_PREFIX    = os.getenv("TOPIC_PREFIX",    "dbserver1")
+DLQ_TOPIC       = os.getenv("DLQ_TOPIC",       "cdc.failed_events")
+MAX_RETRIES     = int(os.getenv("MAX_RETRIES", "3"))
 
 DB = dict(
     host     = os.getenv("TARGET_DB_HOST",     "postgres-target"),
@@ -247,6 +249,76 @@ def pk_from_key(msg, pk_col):
         return None
 
 
+def msg_identity(msg):
+    return (msg.topic(), msg.partition(), msg.offset())
+
+
+def decode_bytes(value):
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def parse_json_or_text(value):
+    text = decode_bytes(value)
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return {"_raw": text}
+
+
+def build_failed_event(msg, exc, retry_count):
+    return {
+        "source_topic": msg.topic(),
+        "source_partition": msg.partition(),
+        "source_offset": msg.offset(),
+        "message_key": decode_bytes(msg.key()),
+        "message_value": parse_json_or_text(msg.value()),
+        "error_message": str(exc),
+        "retry_count": retry_count,
+        "failed_at": datetime.now(timezone.utc).isoformat(),
+        "consumer_group": "cdc-consumer",
+    }
+
+
+def publish_failed_event(producer, failed_event):
+    producer.produce(
+        DLQ_TOPIC,
+        key=failed_event.get("message_key"),
+        value=json.dumps(failed_event, default=str).encode("utf-8"),
+    )
+    producer.flush(10)
+
+
+def record_failed_event(conn, failed_event):
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO ops.failed_events
+            (source_topic, source_partition, source_offset, message_key,
+             message_value, error_message, retry_count, dlq_topic, failed_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            failed_event["source_topic"],
+            failed_event["source_partition"],
+            failed_event["source_offset"],
+            failed_event["message_key"],
+            Json(failed_event["message_value"]),
+            failed_event["error_message"],
+            failed_event["retry_count"],
+            DLQ_TOPIC,
+            failed_event["failed_at"],
+        ),
+    )
+    conn.commit()
+    cur.close()
+
+
 # ── Event processing ──────────────────────────────────────────────────────────
 
 def process_message(conn, msg, state):
@@ -344,12 +416,13 @@ def main():
         "enable.auto.commit":                 False,
         "topic.metadata.refresh.interval.ms": 10_000,
     })
+    producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP})
 
     wait_for_topics(consumer, TOPICS)
     consumer.subscribe(TOPICS)
     log(f"subscribed to {TOPICS}")
 
-    state = {"total": 0}
+    state = {"total": 0, "attempts": {}}
 
     try:
         while True:
@@ -366,17 +439,41 @@ def main():
 
             try:
                 process_message(conn, msg, state)
+                state["attempts"].pop(msg_identity(msg), None)
                 consumer.commit(msg, asynchronous=False)
             except Exception as exc:
                 conn.rollback()
-                log(f"error processing message (will retry): {exc}")
-                time.sleep(1)
+                ident = msg_identity(msg)
+                attempt = state["attempts"].get(ident, 0) + 1
+                state["attempts"][ident] = attempt
+
+                if attempt < MAX_RETRIES:
+                    log(f"error processing message attempt={attempt}/{MAX_RETRIES} (will retry): {exc}")
+                    consumer.seek(TopicPartition(msg.topic(), msg.partition(), msg.offset()))
+                    time.sleep(1)
+                    continue
+
+                failed_event = build_failed_event(msg, exc, attempt)
+                try:
+                    publish_failed_event(producer, failed_event)
+                    record_failed_event(conn, failed_event)
+                    consumer.commit(msg, asynchronous=False)
+                    state["attempts"].pop(ident, None)
+                    log(
+                        f"sent to DLQ topic={DLQ_TOPIC} "
+                        f"source={msg.topic()} offset={msg.offset()} error={exc}"
+                    )
+                except Exception as dlq_exc:
+                    conn.rollback()
+                    log(f"failed to write DLQ event (will retry source message): {dlq_exc}")
+                    time.sleep(1)
                 continue
 
     except KeyboardInterrupt:
         log("shutting down…")
     finally:
         consumer.close()
+        producer.flush(5)
         conn.close()
 
 

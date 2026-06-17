@@ -135,6 +135,7 @@ services:
       SOURCE_DB_NAME: sourcedb
       SOURCE_DB_USER: postgres
       SOURCE_DB_PASSWORD: postgres
+      POISON_EVENTS: "4"
     restart: "no"
 
   consumer:
@@ -153,6 +154,8 @@ services:
       TARGET_DB_NAME: targetdb
       TARGET_DB_USER: postgres
       TARGET_DB_PASSWORD: postgres
+      DLQ_TOPIC: cdc.failed_events
+      MAX_RETRIES: "3"
     restart: unless-stopped
 
   airflow:
