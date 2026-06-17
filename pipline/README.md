@@ -1,152 +1,391 @@
-# CDC Pipeline: PostgreSQL → Debezium → Kafka → Python → PostgreSQL → Superset
+# CDC Pipeline: PostgreSQL -> Debezium -> Kafka -> Python -> PostgreSQL -> Superset
 
-Một pipeline Change Data Capture (CDC) hoàn chỉnh, chạy bằng `docker compose`.
+Pipeline demo Change Data Capture ket hop:
 
-```
-Fake Data (Faker)
-      │  INSERT / UPDATE / DELETE
-      ▼
-PostgreSQL  (sourcedb, public.customers / public.orders)
-      │  WAL (logical replication)
-      ▼
-Debezium CDC  (Kafka Connect, pgoutput)
-      ▼
-Kafka topics  (dbserver1.public.customers, dbserver1.public.orders)
-      ▼
-Python Consumer
-   ├─ parse CDC event
-   ├─ lấy before / after
-   ├─ clean dữ liệu (trim, lowercase email, chuẩn hoá phone/country...)
-   ├─ transform field (email_domain, total_amount...)
-   └─ xử lý insert / update / delete
-      ▼
-PostgreSQL  (targetdb)
-   ├─ raw    : raw.cdc_events     (audit log mọi event)
-   ├─ clean  : clean.customers / clean.orders   (current state)
-   └─ mart   : mart.daily_revenue / mart.customer_summary
-      ▼
-Superset Dashboard  (http://localhost:8088)
+- Realtime ingestion: Debezium + Kafka + Python consumer.
+- Batch reconciliation: Airflow chay PySpark job moi 3 tieng.
+- BI/Dashboard: Superset doc du lieu tu mart layer.
+
+```text
+Fake Data
+  -> PostgreSQL source (sourcedb)
+  -> Debezium CDC
+  -> Kafka topics
+  -> Python consumer realtime
+       -> raw.cdc_events
+       -> clean.customers / clean.orders
+       -> mart.daily_revenue / mart.customer_summary
+
+Airflow DAG moi 3 tieng
+  -> Spark local job
+  -> SELECT mart.refresh_all()
+  -> data-quality checks
+  -> ops.batch_runs
+
+Superset
+  -> doc mart.* va ops.batch_runs
 ```
 
-## Yêu cầu
-- Docker + Docker Compose v2 (`docker compose ...`)
-- Trống các cổng: 5432, 5433, 9092, 8083, 8088
+## Services
 
-## 1. Khởi động toàn bộ pipeline
-```bash
-cd cdc-pipeline
+| Service | Port | Vai tro |
+| --- | ---: | --- |
+| `postgres-source` | `5432` | DB nguon, chua `public.customers`, `public.orders` |
+| `postgres-target` | `5433` | DB dich, chua `raw`, `clean`, `mart`, `ops` |
+| `kafka` | `9092` | Kafka broker |
+| `connect` | `8083` | Kafka Connect / Debezium |
+| `kafka-ui` | `8080` | UI xem Kafka topics |
+| `consumer` | - | Python realtime CDC consumer |
+| `airflow` | `8081` | Airflow UI, chay batch DAG |
+| `superset` | `8088` | BI dashboard |
+
+## 1. Start Pipeline
+
+```powershell
+cd d:\ICS\Task\Thang_6\Dev_data_lab\pipline
 docker compose up -d --build
 ```
-Thứ tự diễn ra tự động:
-1. `postgres-source` / `postgres-target` chạy `init.sql` tạo bảng & schema.
-2. `kafka` + `connect` (Debezium) lên.
-3. `connector-init` đợi Connect sẵn sàng rồi **đăng ký connector** tự động.
-4. `fake-data` bắt đầu sinh dữ liệu, `consumer` bắt đầu xử lý.
 
-Xem log luồng chính:
-```bash
-docker compose logs -f connector-init     # xác nhận connector đã đăng ký
-docker compose logs -f fake-data consumer # thấy event được sinh ra & xử lý
+Theo doi logs chinh:
+
+```powershell
+docker compose logs -f connector-init
+docker compose logs -f fake-data consumer
 ```
 
-## 2. Kiểm tra connector Debezium
-```bash
-curl -s http://localhost:8083/connectors/ecommerce-source-connector/status | python3 -m json.tool
-```
-State của connector và task phải là `RUNNING`. Đăng ký lại thủ công nếu cần:
-```bash
-./debezium/register-connector.sh
+Kiem tra container:
+
+```powershell
+docker compose ps
 ```
 
-## 3. Xem dữ liệu chạy qua Kafka
-```bash
+## 2. Debezium / Kafka
+
+Kiem tra connector:
+
+```powershell
+curl -s http://localhost:8083/connectors/ecommerce-source-connector/status
+```
+
+Connector va task nen o trang thai `RUNNING`.
+
+Xem topics:
+
+```powershell
 docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --list
-
-docker compose exec kafka kafka-console-consumer \
-  --bootstrap-server kafka:29092 \
-  --topic dbserver1.public.orders --from-beginning --max-messages 5
 ```
 
-## 4. Kiểm tra target DB (raw / clean / mart)
-```bash
-docker compose exec postgres-target psql -U postgres -d targetdb -c \
-  "SELECT op, count(*) FROM raw.cdc_events GROUP BY op;"
+Xem thu event trong topic orders:
 
-docker compose exec postgres-target psql -U postgres -d targetdb -c \
-  "SELECT id, email, email_domain, phone, country FROM clean.customers LIMIT 5;"
-
-docker compose exec postgres-target psql -U postgres -d targetdb -c \
-  "SELECT * FROM mart.daily_revenue ORDER BY total_revenue DESC LIMIT 10;"
-
-docker compose exec postgres-target psql -U postgres -d targetdb -c \
-  "SELECT * FROM mart.customer_summary ORDER BY total_spent DESC LIMIT 10;"
-```
-So sánh với source:
-```bash
-docker compose exec postgres-source psql -U postgres -d sourcedb -c \
-  "SELECT count(*) FROM customers; SELECT count(*) FROM orders;"
+```powershell
+docker compose exec kafka kafka-console-consumer `
+  --bootstrap-server kafka:29092 `
+  --topic dbserver1.public.orders `
+  --from-beginning `
+  --max-messages 5
 ```
 
-## 5. Superset Dashboard
-Khởi tạo Superset lần đầu (chạy 1 lần):
-```bash
+Kafka UI:
+
+```text
+http://localhost:8080
+```
+
+## 3. Target DB Layers
+
+Target DB co 4 schema chinh:
+
+- `raw`: luu toan bo CDC event dang audit log.
+- `clean`: current state da clean/transform.
+- `mart`: bang tong hop cho dashboard.
+- `ops`: log van hanh batch.
+
+Kiem tra raw:
+
+```powershell
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT source_table, op, count(*) FROM raw.cdc_events GROUP BY source_table, op ORDER BY source_table, op;"
+```
+
+Kiem tra clean:
+
+```powershell
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT id, full_name, email, email_domain, phone, country FROM clean.customers ORDER BY id DESC LIMIT 10;"
+```
+
+```powershell
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT id, customer_id, product_name, quantity, unit_price, total_amount, status FROM clean.orders ORDER BY id DESC LIMIT 10;"
+```
+
+Kiem tra mart:
+
+```powershell
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT * FROM mart.daily_revenue ORDER BY order_day DESC, country;"
+```
+
+```powershell
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT * FROM mart.customer_summary ORDER BY total_spent DESC LIMIT 20;"
+```
+
+## 4. Realtime Consumer Logic
+
+`consumer/consumer.py` doc CDC event tu cac topic:
+
+- `dbserver1.public.customers`
+- `dbserver1.public.orders`
+
+Voi moi event:
+
+1. Append event goc vao `raw.cdc_events`.
+2. Upsert/delete dong hien tai vao `clean.customers` hoac `clean.orders`.
+3. Goi function mart incremental:
+   - `mart.on_customer_change(...)`
+   - `mart.on_order_change(...)`
+4. Commit DB transaction.
+5. Commit Kafka offset.
+
+Transform chinh:
+
+- Customer:
+  - trim `full_name`
+  - lowercase `email`
+  - sinh `email_domain`
+  - chuan hoa `phone`
+  - chuan hoa `country`, neu thieu thi thanh `UNKNOWN`
+- Order:
+  - ep `quantity` ve so nguyen khong am
+  - parse `unit_price` thanh Decimal
+  - tinh `total_amount = quantity * unit_price`
+  - uppercase `status`
+
+Routing theo Debezium `op`:
+
+- `c`, `r`, `u`: upsert vao clean.
+- `d`: delete khoi clean.
+- moi event deu append vao raw.
+
+## 5. Mart Logic
+
+`mart.daily_revenue` tong hop theo:
+
+```text
+order_day + country
+```
+
+Chi tinh order co:
+
+```sql
+status <> 'CANCELLED'
+```
+
+Metrics:
+
+- `total_orders = COUNT(*)`
+- `total_items = SUM(quantity)`
+- `total_revenue = SUM(total_amount)`
+
+`mart.customer_summary` tong hop theo customer:
+
+- `total_orders = COUNT(order)`
+- `total_spent = SUM(total_amount)` voi order khong `CANCELLED`
+- `last_order_date = MAX(order_date)`
+
+Mart realtime dung incremental update de nhanh. Ngoai ra co:
+
+```sql
+SELECT mart.refresh_all();
+```
+
+Function nay rebuild toan bo `mart.daily_revenue` va `mart.customer_summary` tu `clean`, dung cho batch reconciliation.
+
+## 6. Airflow + Spark Batch
+
+Batch khong thay the realtime. No chay song song de reconcile va kiem tra du lieu dinh ky.
+
+DAG:
+
+```text
+cdc_batch_reconcile_3h
+```
+
+Lich chay:
+
+```text
+0 */3 * * *
+```
+
+Tuc la moi 3 tieng.
+
+Batch job lam:
+
+1. Start Spark local session.
+2. Goi `SELECT mart.refresh_all();`.
+3. Tinh data-quality metrics.
+4. Ghi ket qua vao `ops.batch_runs`.
+
+Airflow UI:
+
+```text
+http://localhost:8081
+admin / admin
+```
+
+Chay batch thu cong bang terminal:
+
+```powershell
+docker compose exec airflow python -u /opt/airflow/batch/spark_batch.py
+```
+
+Kiem tra batch log:
+
+```powershell
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT batch_id, started_at, finished_at, status, duration_seconds, dq_issue_count FROM ops.batch_runs ORDER BY batch_id DESC LIMIT 10;"
+```
+
+Status co the gap:
+
+- `SUCCESS`: batch chay xong va khong co data-quality issue.
+- `SUCCESS_WITH_WARNINGS`: batch chay xong nhung co issue, vi du `UNKNOWN` country hoac order khong join duoc customer.
+- `FAILED`: batch loi.
+
+## 7. Superset Dashboard
+
+Mo Superset:
+
+```text
+http://localhost:8088
+```
+
+Khoi tao Superset lan dau:
+
+```powershell
 docker compose exec superset superset db upgrade
-docker compose exec superset superset fab create-admin \
-  --username admin --firstname Admin --lastname User \
-  --email admin@example.com --password admin
+docker compose exec superset superset fab create-admin `
+  --username admin `
+  --firstname Admin `
+  --lastname User `
+  --email admin@example.com `
+  --password admin
 docker compose exec superset superset init
 ```
-Mở http://localhost:8088 (admin / admin), rồi:
-1. **Settings → Database Connections → + Database → PostgreSQL**, dùng URI:
-   ```
-   postgresql://postgres:postgres@postgres-target:5432/targetdb
-   ```
-2. **Datasets → + Dataset**, thêm các bảng trong schema `mart`
-   (`daily_revenue`, `customer_summary`) và/hoặc `clean`.
-3. Tạo Chart / Dashboard, ví dụ:
-   - Doanh thu theo ngày: `mart.daily_revenue` (X = order_day, Y = total_revenue).
-   - Doanh thu theo quốc gia: group by `country`.
-   - Top khách hàng: `mart.customer_summary` sort `total_spent`.
 
-> Lưu ý: metadata của Superset trong demo này là ephemeral. Nếu cần lưu lâu dài,
-> trỏ Superset sang một Postgres metadata riêng và mount volume.
+Khi tao database connection trong Superset, neu wizard khong cho dan URL thi nhap tung field:
 
-## Cleaning & transform đang làm gì (trong `consumer/consumer.py`)
-**customers**
-- `full_name`: bỏ khoảng trắng thừa.
-- `email`: trim + lowercase; sinh thêm `email_domain`.
-- `phone`: chỉ giữ chữ số và dấu `+` đầu.
-- `country`: trim + Title Case (`" VIETNAM "` → `Vietnam`).
-
-**orders**
-- `quantity`: ép kiểu int, không âm.
-- `unit_price`: parse `NUMERIC` (chuỗi) → `Decimal`.
-- `total_amount` (derived) = `quantity * unit_price`.
-- `status`: trim + UPPERCASE.
-
-**Routing theo `op`**
-- `c` (create) / `r` (snapshot) / `u` (update) → UPSERT vào `clean.*`.
-- `d` (delete) → DELETE khỏi `clean.*`.
-- Mọi event đều được append vào `raw.cdc_events` trước (audit/replay).
-- `mart.*` được rebuild bằng `mart.refresh_all()` định kỳ (mỗi 20 event hoặc 15 giây).
-
-## Dừng / dọn dẹp
-```bash
-docker compose down        # dừng, giữ dữ liệu
-docker compose down -v     # dừng và xoá toàn bộ volume + replication slot
+```text
+HOST: postgres-target
+PORT: 5432
+DATABASE NAME: targetdb
+USERNAME: postgres
+PASSWORD: postgres
+DISPLAY NAME: targetdb
+SSL: off
+SSH Tunnel: off
 ```
 
-## Tinh chỉnh nhanh
-- Đổi bảng được capture: `table.include.list` trong `debezium/connector-config.json`
-  và `TABLES` trong `consumer/consumer.py`.
-- Tần suất sinh dữ liệu: `time.sleep(...)` trong `fake-data/generate.py`.
-- Nhịp refresh mart: `REFRESH_EVERY_EVENTS` / `REFRESH_EVERY_SECONDS` trong consumer.
+Dataset nen them:
 
-## Troubleshooting
-- **Connector không RUNNING**: xem `docker compose logs connect`; thường do source DB
-  chưa bật `wal_level=logical` (đã set sẵn trong compose) hoặc đăng ký quá sớm —
-  chạy lại `./debezium/register-connector.sh`.
-- **Consumer không thấy event**: kiểm tra topic đã tồn tại (mục 3) và connector RUNNING.
-- **Làm lại từ đầu**: `docker compose down -v && docker compose up -d --build`
-  (lệnh `-v` xoá cả replication slot `debezium_slot`).
+- `mart.daily_revenue`
+- `mart.customer_summary`
+- `ops.batch_runs`
+
+Chart goi y cho business dashboard:
+
+- Big Number: `SUM(total_revenue)` tu `mart.daily_revenue`
+- Bar Chart: doanh thu theo quoc gia tu `mart.daily_revenue`
+- Bar Chart hoac Table: top khach hang tu `mart.customer_summary`
+- Time-series Line Chart: doanh thu theo ngay neu du lieu co nhieu `order_day`
+
+Chart goi y cho batch monitoring:
+
+- Latest batch status tu `ops.batch_runs`
+- Batch duration trend tu `ops.batch_runs`
+- Batch run history table tu `ops.batch_runs`
+- Data-quality issue count tu `ops.batch_runs.dq_issue_count`
+
+## 8. Data Quality Queries
+
+Customer thieu country:
+
+```powershell
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT id, full_name, email, country FROM clean.customers WHERE country = 'UNKNOWN' ORDER BY id;"
+```
+
+Order khong join duoc customer:
+
+```powershell
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT o.id, o.customer_id, o.total_amount FROM clean.orders o LEFT JOIN clean.customers c ON c.id = o.customer_id WHERE c.id IS NULL;"
+```
+
+Recompute revenue truc tiep tu clean de doi chieu mart:
+
+```powershell
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT o.order_date::date AS order_day, COALESCE(NULLIF(c.country, ''), 'UNKNOWN') AS country, COUNT(*) AS total_orders, SUM(o.quantity) AS total_items, SUM(o.total_amount) AS total_revenue FROM clean.orders o LEFT JOIN clean.customers c ON c.id = o.customer_id WHERE o.status <> 'CANCELLED' GROUP BY o.order_date::date, COALESCE(NULLIF(c.country, ''), 'UNKNOWN') ORDER BY order_day DESC, country;"
+```
+
+Reconcile mart thu cong:
+
+```powershell
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT mart.refresh_all();"
+```
+
+## 9. Chay Lai Fake Data
+
+```powershell
+docker compose up -d --build --force-recreate fake-data
+docker compose logs -f fake-data
+```
+
+Theo doi consumer:
+
+```powershell
+docker compose logs -f consumer
+```
+
+## 10. Dung / Don Dep
+
+Dung services, giu du lieu container:
+
+```powershell
+docker compose down
+```
+
+Dung va xoa volume:
+
+```powershell
+docker compose down -v
+```
+
+Lenh `down -v` se xoa du lieu DB va replication slot, dung khi muon lam lai tu dau.
+
+## 11. Troubleshooting
+
+Connector khong `RUNNING`:
+
+```powershell
+docker compose logs connect
+docker compose logs connector-init
+```
+
+Consumer khong thay event:
+
+```powershell
+docker compose logs consumer
+docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --list
+```
+
+Airflow khong thay DAG:
+
+```powershell
+docker compose logs airflow
+```
+
+Superset khong connect duoc target DB:
+
+- Trong Superset container, dung host `postgres-target`, port `5432`.
+- Tu may host Windows, Postgres target la `localhost:5433`.
+
+Lam lai toan bo:
+
+```powershell
+docker compose down -v
+docker compose up -d --build
 ```

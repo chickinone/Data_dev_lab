@@ -6,6 +6,7 @@
 CREATE SCHEMA IF NOT EXISTS raw;
 CREATE SCHEMA IF NOT EXISTS clean;
 CREATE SCHEMA IF NOT EXISTS mart;
+CREATE SCHEMA IF NOT EXISTS ops;
 
 -- RAW : every change event, stored as-is (audit / replay / debug)
 CREATE TABLE IF NOT EXISTS raw.cdc_events (
@@ -68,6 +69,22 @@ CREATE TABLE IF NOT EXISTS mart.customer_summary (
     last_order_date TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS ops.batch_runs (
+    batch_id                   BIGSERIAL PRIMARY KEY,
+    job_name                   TEXT NOT NULL,
+    started_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at                TIMESTAMPTZ,
+    status                     TEXT NOT NULL,
+    duration_seconds           NUMERIC(12,3),
+    raw_events_count           BIGINT,
+    clean_customers_count      BIGINT,
+    clean_orders_count         BIGINT,
+    mart_daily_revenue_rows    BIGINT,
+    mart_customer_summary_rows BIGINT,
+    dq_issue_count             BIGINT,
+    metrics                    JSONB,
+    error_message              TEXT
+);
 
 CREATE OR REPLACE FUNCTION mart.refresh_all()
 RETURNS void
