@@ -518,10 +518,24 @@ docker compose logs -f consumer
 
 ## 11. Dung / Don Dep
 
-Dung services, giu du lieu container:
+Dung services, giu du lieu trong named volumes:
 
 ```powershell
 docker compose down
+```
+
+Lenh nay giu lai:
+
+- PostgreSQL source/target data.
+- MongoDB source/target data.
+- Kafka/Zookeeper data.
+- Airflow metadata/logs.
+- Superset user, database connection, dataset, chart, dashboard.
+
+Chay lai ma khong mat du lieu:
+
+```powershell
+docker compose up -d
 ```
 
 Dung va xoa volume:
@@ -530,7 +544,7 @@ Dung va xoa volume:
 docker compose down -v
 ```
 
-Lenh `down -v` se xoa du lieu DB va replication slot, dung khi muon lam lai tu dau.
+Lenh `down -v` se xoa du lieu DB, Kafka topics, Airflow metadata va Superset dashboard, dung khi muon lam lai tu dau.
 
 ## 12. Troubleshooting
 

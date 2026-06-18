@@ -17,6 +17,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
+      - postgres_source_data:/var/lib/postgresql/data
       - ./db/postgres_source/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
@@ -34,6 +35,7 @@ services:
     ports:
       - "5433:5432"          
     volumes:
+      - postgres_target_data:/var/lib/postgresql/data
       - ./db/postgres_target/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
@@ -60,6 +62,9 @@ services:
       MONGO_REPLICA_SET_KEY: ${MONGO_REPLICA_SET_KEY}
     ports:
       - "27017:27017"
+    volumes:
+      - mongo_source_data:/data/db
+      - mongo_source_config:/data/configdb
     healthcheck:
       test:
         [
@@ -100,6 +105,9 @@ services:
       MONGO_INITDB_DATABASE: ${MONGO_TARGET_DATABASE}
     ports:
       - "27018:27017"
+    volumes:
+      - mongo_target_data:/data/db
+      - mongo_target_config:/data/configdb
     healthcheck:
       test:
         [
@@ -116,6 +124,9 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
 
   kafka:
     image: confluentinc/cp-kafka:7.6.1
@@ -135,6 +146,8 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -405,6 +418,7 @@ services:
       MONGO_TARGET_ROOT_PASSWORD: ${MONGO_TARGET_ROOT_PASSWORD}
       MONGO_TARGET_AUTH_SOURCE: ${MONGO_TARGET_AUTH_SOURCE}
     volumes:
+      - airflow_home:/opt/airflow
       - ./airflow/dags:/opt/airflow/dags:ro
       - ./batch:/opt/airflow/batch:ro
     command:
@@ -438,4 +452,19 @@ services:
       SUPERSET_ADMIN_LASTNAME: ${SUPERSET_ADMIN_LASTNAME}
       SUPERSET_ADMIN_EMAIL: ${SUPERSET_ADMIN_EMAIL}
       SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
+    volumes:
+      - superset_home:/app/superset_home
     restart: unless-stopped
+
+volumes:
+  postgres_source_data:
+  postgres_target_data:
+  mongo_source_data:
+  mongo_source_config:
+  mongo_target_data:
+  mongo_target_config:
+  zookeeper_data:
+  zookeeper_log:
+  kafka_data:
+  airflow_home:
+  superset_home:
