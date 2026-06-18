@@ -118,6 +118,68 @@ services:
       timeout: 5s
       retries: 24
 
+  minio-source:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: minio-source
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_SOURCE_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_SOURCE_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_source_data:/data
+
+  minio-target:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: minio-target
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_TARGET_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_TARGET_ROOT_PASSWORD}
+    ports:
+      - "9100:9000"
+      - "9101:9001"
+    volumes:
+      - minio_target_data:/data
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+    container_name: minio-init
+    depends_on:
+      minio-source:
+        condition: service_started
+      minio-target:
+        condition: service_started
+    environment:
+      MINIO_SOURCE_ROOT_USER: ${MINIO_SOURCE_ROOT_USER}
+      MINIO_SOURCE_ROOT_PASSWORD: ${MINIO_SOURCE_ROOT_PASSWORD}
+      MINIO_TARGET_ROOT_USER: ${MINIO_TARGET_ROOT_USER}
+      MINIO_TARGET_ROOT_PASSWORD: ${MINIO_TARGET_ROOT_PASSWORD}
+      MINIO_SOURCE_BUCKETS: ${MINIO_SOURCE_BUCKETS}
+      MINIO_TARGET_BUCKETS: ${MINIO_TARGET_BUCKETS}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        until mc alias set source http://minio-source:9000 "$${MINIO_SOURCE_ROOT_USER}" "$${MINIO_SOURCE_ROOT_PASSWORD}" && mc ready source; do
+          echo "Waiting for minio-source...";
+          sleep 3;
+        done;
+        until mc alias set target http://minio-target:9000 "$${MINIO_TARGET_ROOT_USER}" "$${MINIO_TARGET_ROOT_PASSWORD}" && mc ready target; do
+          echo "Waiting for minio-target...";
+          sleep 3;
+        done;
+        for bucket in $${MINIO_SOURCE_BUCKETS}; do
+          mc mb --ignore-existing "source/$${bucket}";
+        done;
+        for bucket in $${MINIO_TARGET_BUCKETS}; do
+          mc mb --ignore-existing "target/$${bucket}";
+        done;
+        echo "minio-init finished.";
+    restart: "no"
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
     container_name: zookeeper
@@ -333,6 +395,57 @@ services:
       MONGO_FAKE_SLEEP_MAX_SECONDS: ${MONGO_FAKE_SLEEP_MAX_SECONDS}
     restart: "no"
 
+  object-event-producer:
+    build: ./producers/object_event_producer
+    container_name: object-event-producer
+    depends_on:
+      kafka:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
+      OBJECT_EVENTS_TOPIC: ${OBJECT_EVENTS_TOPIC}
+      OBJECT_EVENT_SCAN_INTERVAL_SECONDS: ${OBJECT_EVENT_SCAN_INTERVAL_SECONDS}
+      OBJECT_EVENT_RUN_ONCE: ${OBJECT_EVENT_RUN_ONCE}
+      MINIO_SOURCE_ENDPOINT: ${MINIO_SOURCE_ENDPOINT}
+      MINIO_SOURCE_ROOT_USER: ${MINIO_SOURCE_ROOT_USER}
+      MINIO_SOURCE_ROOT_PASSWORD: ${MINIO_SOURCE_ROOT_PASSWORD}
+      MINIO_SOURCE_BUCKETS: ${MINIO_SOURCE_BUCKETS}
+    restart: unless-stopped
+
+  object-sink-consumer:
+    build: ./consumers/consumer_object
+    container_name: object-sink-consumer
+    depends_on:
+      kafka:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+      mongodb-target:
+        condition: service_healthy
+      object-event-producer:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
+      OBJECT_EVENTS_TOPIC: ${OBJECT_EVENTS_TOPIC}
+      OBJECT_DLQ_TOPIC: ${OBJECT_DLQ_TOPIC}
+      OBJECT_SINK_GROUP_ID: ${OBJECT_SINK_GROUP_ID}
+      MAX_RETRIES: ${MAX_RETRIES}
+      MINIO_SOURCE_ENDPOINT: ${MINIO_SOURCE_ENDPOINT}
+      MINIO_SOURCE_ROOT_USER: ${MINIO_SOURCE_ROOT_USER}
+      MINIO_SOURCE_ROOT_PASSWORD: ${MINIO_SOURCE_ROOT_PASSWORD}
+      MINIO_TARGET_ENDPOINT: ${MINIO_TARGET_ENDPOINT}
+      MINIO_TARGET_ROOT_USER: ${MINIO_TARGET_ROOT_USER}
+      MINIO_TARGET_ROOT_PASSWORD: ${MINIO_TARGET_ROOT_PASSWORD}
+      MONGO_TARGET_HOST: ${MONGO_TARGET_HOST}
+      MONGO_TARGET_PORT: ${MONGO_TARGET_PORT}
+      MONGO_TARGET_DATABASE: ${MONGO_TARGET_DATABASE}
+      MONGO_TARGET_ROOT_USERNAME: ${MONGO_TARGET_ROOT_USERNAME}
+      MONGO_TARGET_ROOT_PASSWORD: ${MONGO_TARGET_ROOT_PASSWORD}
+      MONGO_TARGET_AUTH_SOURCE: ${MONGO_TARGET_AUTH_SOURCE}
+    restart: unless-stopped
+
   mongo-sink-consumer:
     build: ./consumers/consumer_mongo
     container_name: mongo-sink-consumer
@@ -417,6 +530,11 @@ services:
       MONGO_TARGET_ROOT_USERNAME: ${MONGO_TARGET_ROOT_USERNAME}
       MONGO_TARGET_ROOT_PASSWORD: ${MONGO_TARGET_ROOT_PASSWORD}
       MONGO_TARGET_AUTH_SOURCE: ${MONGO_TARGET_AUTH_SOURCE}
+      OBJECT_BATCH_JOB_NAME: ${OBJECT_BATCH_JOB_NAME}
+      MINIO_TARGET_ENDPOINT: ${MINIO_TARGET_ENDPOINT}
+      MINIO_TARGET_ROOT_USER: ${MINIO_TARGET_ROOT_USER}
+      MINIO_TARGET_ROOT_PASSWORD: ${MINIO_TARGET_ROOT_PASSWORD}
+      MINIO_TARGET_BUCKETS: ${MINIO_TARGET_BUCKETS}
     volumes:
       - airflow_home:/opt/airflow
       - ./airflow/dags:/opt/airflow/dags:ro
@@ -463,6 +581,8 @@ volumes:
   mongo_source_config:
   mongo_target_data:
   mongo_target_config:
+  minio_source_data:
+  minio_target_data:
   zookeeper_data:
   zookeeper_log:
   kafka_data:

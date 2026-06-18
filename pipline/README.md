@@ -1,72 +1,137 @@
-# CDC Pipeline: PostgreSQL -> Debezium -> Kafka -> Python -> PostgreSQL -> Superset
+# Data Pipeline Lab
 
-Pipeline demo Change Data Capture ket hop:
+Demo pipeline xu ly 3 loai du lieu:
 
-- Realtime ingestion: Debezium + Kafka + Python consumer.
-- Batch reconciliation: Airflow chay PySpark job moi 3 tieng.
-- BI/Dashboard: Superset doc du lieu tu mart layer.
+- Structured data: PostgreSQL.
+- NoSQL document data: MongoDB.
+- Unstructured/object data: MinIO cho file, MongoDB cho metadata.
+
+Tat ca cung dung chung backbone:
 
 ```text
-Fake Data
-  -> PostgreSQL source (sourcedb)
-  -> Debezium CDC
-  -> Kafka topics
-  -> Python consumer realtime
-       -> raw.cdc_events
-       -> clean.customers / clean.orders
-       -> mart.daily_revenue / mart.customer_summary
-
-Airflow DAG moi 3 tieng
-  -> Spark local job
-  -> SELECT mart.refresh_all()
-  -> data-quality checks
-  -> ops.batch_runs
-
-Superset
-  -> doc mart.* va ops.batch_runs
+source
+-> event/queue/stream
+-> consumer realtime
+-> raw
+-> clean
+-> mart
+-> batch reconcile
+-> DLQ/ops log
 ```
+
+## Architecture
+
+**PostgreSQL**
+
+```text
+fake-data
+-> postgres-source
+-> Debezium PostgreSQL connector
+-> Kafka topics dbserver1.public.*
+-> consumer_postgres
+-> postgres-target
+   raw.cdc_events
+   clean.customers / clean.orders
+   mart.daily_revenue / mart.customer_summary
+   ops.failed_events / ops.batch_runs
+-> Airflow batch_postgres
+-> Superset
+```
+
+**MongoDB**
+
+```text
+fake-mongo-data
+-> mongodb
+-> Debezium MongoDB connector
+-> Kafka topics mongodb.ecommerce_nosql.*
+-> consumer_mongo
+-> mongodb-target
+   raw_*
+   clean_*
+   mart_*
+   ops_failed_events / ops_batch_runs
+-> Airflow batch_mongo
+```
+
+**Object Store / MinIO**
+
+```text
+manual import file
+-> minio-source raw-* buckets
+-> object-event-producer
+-> Kafka topic object.events
+-> object-sink-consumer
+-> minio-target clean-* buckets
+-> mongodb-target object metadata
+   raw_object_events
+   clean_object_metadata
+   mart_object_*
+   ops_object_failed_events / ops_object_batch_runs
+-> Airflow batch_object
+```
+
+Kafka khong luu binary file. Kafka chi luu metadata event, file that nam trong MinIO.
 
 ## Folder Layout
 
 ```text
 pipline/
-  db/
-    postgres_source/
-    postgres_target/
-  connectors/
-    debezium_postgres/
-  fake-data/
-    fake_data_structured/
-    fake_data_nosql/
-    fake_data_unstructured/
-  consumers/
-    consumer_postgres/
-    consumer_mongo/
+  airflow/
+    dags/
   batch/
     batch_postgres/
     batch_mongo/
-  airflow/
-    dags/
+    batch_object/
+  connectors/
+    debezium_postgres/
+  consumers/
+    consumer_postgres/
+    consumer_mongo/
+    consumer_object/
+  db/
+    postgres_source/
+    postgres_target/
+  fake-data/
+    fake_data_structured/
+    fake_data_nosql/
+  producers/
+    object_event_producer/
+  docker-compose.yml
+  .env.example
 ```
 
 ## Services
 
-| Service | Port | Vai tro |
+| Service | Port | Role |
 | --- | ---: | --- |
-| `postgres-source` | `5432` | DB nguon, chua `public.customers`, `public.orders` |
-| `postgres-target` | `5433` | DB dich, chua `raw`, `clean`, `mart`, `ops` |
-| `mongodb` | `27017` | NoSQL source, chua document fake cho CDC/stream ve sau |
-| `mongodb-target` | `27018` | NoSQL target, nhan document realtime tu Kafka |
-| `fake-mongo-data` | - | Sinh document fake MongoDB rieng voi fake-data structured |
-| `mongo-sink-consumer` | - | Doc Kafka topics MongoDB va ghi sang `mongodb-target` |
+| `postgres-source` | `5432` | PostgreSQL source |
+| `postgres-target` | `5433` | PostgreSQL raw/clean/mart target |
+| `mongodb` | `27017` | MongoDB source |
+| `mongodb-target` | `27018` | MongoDB target for NoSQL and object metadata |
+| `minio-source` | `9000`, `9001` | Object source API/console |
+| `minio-target` | `9100`, `9101` | Object target API/console |
 | `kafka` | `9092` | Kafka broker |
 | `connect` | `8083` | Kafka Connect / Debezium |
-| `kafka-ui` | `8080` | UI xem Kafka topics |
-| `consumer` | - | Python realtime CDC consumer |
-| `airflow` | `8081` | Airflow UI, chay batch DAG |
-| `superset` | `8088` | BI dashboard |
+| `kafka-ui` | `8080` | Kafka UI |
+| `airflow` | `8081` | Batch scheduler |
+| `superset` | `8088` | Dashboard for PostgreSQL mart |
+| `consumer` | - | PostgreSQL realtime consumer |
+| `mongo-sink-consumer` | - | MongoDB realtime consumer |
+| `object-event-producer` | - | Scan MinIO source and publish object events |
+| `object-sink-consumer` | - | Copy object to target and write metadata |
 
-## 1. Start Pipeline
+## Start
+
+Ubuntu/Linux:
+
+```bash
+cd ~/Data_dev_lab/pipline
+cp .env.example .env
+docker compose up -d --build
+```
+
+Windows PowerShell:
 
 ```powershell
 cd d:\ICS\Task\Thang_6\Dev_data_lab\pipline
@@ -74,508 +139,419 @@ copy .env.example .env
 docker compose up -d --build
 ```
 
-Sua cac gia tri trong `.env` truoc khi chay neu day khong phai moi truong demo local.
+Check containers:
 
-Theo doi logs chinh:
-
-```powershell
-docker compose logs -f connector-init
-docker compose logs -f fake-data fake-mongo-data consumer
-```
-
-Kiem tra container:
-
-```powershell
+```bash
 docker compose ps
 ```
 
-## 2. Debezium / Kafka
+Stop without deleting data:
 
-Kiem tra connector:
-
-```powershell
-curl -s http://localhost:8083/connectors/ecommerce-source-connector/status
+```bash
+docker compose down
 ```
 
-Connector va task nen o trang thai `RUNNING`.
+Start again without losing data:
 
-Xem topics:
+```bash
+docker compose up -d
+```
 
-```powershell
+Delete everything and start fresh:
+
+```bash
+docker compose down -v
+docker compose up -d --build
+```
+
+Do not use `down -v` if you want to keep PostgreSQL, MongoDB, MinIO, Kafka, Airflow, and Superset data.
+
+## Important URLs
+
+```text
+Kafka UI:            http://localhost:8080
+Airflow:             http://localhost:8081
+Superset:            http://localhost:8088
+MinIO source UI:     http://localhost:9001
+MinIO target UI:     http://localhost:9101
+Kafka Connect REST:  http://localhost:8083
+```
+
+On cloud/Ubuntu server, replace `localhost` with the server public IP, or use SSH tunnel.
+
+MinIO accounts from local `.env`:
+
+```text
+Source console 9001: minio_source / minio_source
+Target console 9101: minio_target / minio_target
+```
+
+## Environment
+
+`.env` is local and ignored by Git.
+
+`.env.example` is committed as a safe template with `change-me` values.
+
+If you change `Dockerfile` or `requirements.txt`, rebuild the affected service:
+
+```bash
+docker compose up -d --build --force-recreate airflow
+docker compose up -d --build --force-recreate object-sink-consumer
+```
+
+## PostgreSQL Flow
+
+Start/re-run fake structured data:
+
+```bash
+docker compose up -d --build --force-recreate fake-data
+docker compose logs -f fake-data
+```
+
+Check Debezium PostgreSQL connector:
+
+```bash
+curl http://localhost:8083/connectors/ecommerce-source-connector/status
+```
+
+Check Kafka topics:
+
+```bash
 docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --list
 ```
 
-Xem thu event trong topic orders:
+Check source data:
 
-```powershell
-docker compose exec kafka kafka-console-consumer `
-  --bootstrap-server kafka:29092 `
-  --topic dbserver1.public.orders `
-  --from-beginning `
-  --max-messages 5
+```bash
+docker compose exec postgres-source psql -U postgres -d sourcedb -c "SELECT 'customers' AS table_name, COUNT(*) FROM customers UNION ALL SELECT 'orders', COUNT(*) FROM orders;"
 ```
 
-Kafka UI:
+Check target raw/clean/mart:
 
-```text
-http://localhost:8080
+```bash
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT 'raw_events' AS metric, COUNT(*) FROM raw.cdc_events UNION ALL SELECT 'clean_customers', COUNT(*) FROM clean.customers UNION ALL SELECT 'clean_orders', COUNT(*) FROM clean.orders UNION ALL SELECT 'mart_daily_revenue', COUNT(*) FROM mart.daily_revenue UNION ALL SELECT 'mart_customer_summary', COUNT(*) FROM mart.customer_summary UNION ALL SELECT 'failed_events', COUNT(*) FROM ops.failed_events;"
 ```
 
-## 2.1 MongoDB Fake Data
+Check mart samples:
 
-`fake-mongo-data` la generator rieng cho NoSQL, khong dung chung voi `fake-data`
-structured/PostgreSQL. Service nay ghi vao MongoDB database cau hinh boi
-`MONGO_DATABASE` trong `.env`.
-
-Collections duoc sinh:
-
-- `customer_profiles`: profile document mo rong theo customer.
-- `product_reviews`: review document co rating/status/tags.
-- `click_events`: su kien hanh vi dang append-only.
-
-Realtime MongoDB flow:
-
-```text
-fake-mongo-data
-  -> mongodb (source)
-  -> Debezium MongoDB connector
-  -> Kafka topics mongodb.ecommerce_nosql.*
-  -> mongo-sink-consumer
-  -> mongodb-target raw_* va clean_* collections
-```
-
-`mongodb-target` luu rieng hai lop:
-
-- `raw_customer_profiles`, `raw_product_reviews`, `raw_click_events`: document goc tu MongoDB source + `_cdc`.
-- `clean_customer_profiles`, `clean_product_reviews`, `clean_click_events`: document da trim/normalize/validate nhe + `_cdc`.
-- `mart_product_review_summary`, `mart_customer_engagement_summary`, `mart_country_profile_summary`: aggregate realtime/batch.
-- `ops_failed_events`, `ops_batch_runs`: log loi va batch run cua MongoDB pipeline.
-
-Kiem tra nhanh:
-
-```powershell
-docker compose exec mongodb sh -c 'mongosh \
-  -u "$MONGO_INITDB_ROOT_USERNAME" \
-  -p "$MONGO_INITDB_ROOT_PASSWORD" \
-  --authenticationDatabase admin \
-  "$MONGO_INITDB_DATABASE" \
-  --eval "db.customer_profiles.countDocuments(); db.product_reviews.countDocuments(); db.click_events.countDocuments();"'
-```
-
-Kiem tra Kafka topics MongoDB:
-
-```powershell
-docker compose exec kafka kafka-topics `
-  --bootstrap-server kafka:29092 `
-  --list
-```
-
-Kiem tra du lieu da sink sang MongoDB target:
-
-```powershell
-docker compose exec mongodb-target sh -c 'mongosh \
-  -u "$MONGO_INITDB_ROOT_USERNAME" \
-  -p "$MONGO_INITDB_ROOT_PASSWORD" \
-  --authenticationDatabase admin \
-  "$MONGO_INITDB_DATABASE" \
-  --eval "printjson({raw_profiles: db.raw_customer_profiles.countDocuments(), clean_profiles: db.clean_customer_profiles.countDocuments(), raw_reviews: db.raw_product_reviews.countDocuments(), clean_reviews: db.clean_product_reviews.countDocuments(), raw_clicks: db.raw_click_events.countDocuments(), clean_clicks: db.clean_click_events.countDocuments()})"'
-```
-
-Kiem tra MongoDB mart:
-
-```powershell
-docker compose exec mongodb-target sh -c 'mongosh \
-  -u "$MONGO_INITDB_ROOT_USERNAME" \
-  -p "$MONGO_INITDB_ROOT_PASSWORD" \
-  --authenticationDatabase admin \
-  "$MONGO_INITDB_DATABASE" \
-  --eval "printjson({product_summary: db.mart_product_review_summary.countDocuments(), customer_summary: db.mart_customer_engagement_summary.countDocuments(), country_summary: db.mart_country_profile_summary.countDocuments()})"'
-```
-
-Chay MongoDB batch reconcile thu cong:
-
-```powershell
-docker compose exec airflow python -u /opt/airflow/batch/batch_mongo/mongo_batch.py
-```
-
-## 3. Target DB Layers
-
-Target DB co 4 schema chinh:
-
-- `raw`: luu toan bo CDC event dang audit log.
-- `clean`: current state da clean/transform.
-- `mart`: bang tong hop cho dashboard.
-- `ops`: log van hanh batch.
-
-Kiem tra raw:
-
-```powershell
-docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT source_table, op, count(*) FROM raw.cdc_events GROUP BY source_table, op ORDER BY source_table, op;"
-```
-
-Kiem tra clean:
-
-```powershell
-docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT id, full_name, email, email_domain, phone, country FROM clean.customers ORDER BY id DESC LIMIT 10;"
-```
-
-```powershell
-docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT id, customer_id, product_name, quantity, unit_price, total_amount, status FROM clean.orders ORDER BY id DESC LIMIT 10;"
-```
-
-Kiem tra mart:
-
-```powershell
-docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT * FROM mart.daily_revenue ORDER BY order_day DESC, country;"
-```
-
-```powershell
+```bash
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT * FROM mart.daily_revenue ORDER BY order_day DESC, country LIMIT 20;"
 docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT * FROM mart.customer_summary ORDER BY total_spent DESC LIMIT 20;"
 ```
 
-## 4. Realtime Consumer Logic
+Run PostgreSQL batch:
 
-`consumers/consumer_postgres/consumer.py` doc CDC event tu cac topic:
+```bash
+docker compose exec airflow python -u /opt/airflow/batch/batch_postgres/spark_batch.py
+```
 
-- `dbserver1.public.customers`
-- `dbserver1.public.orders`
+Check batch log:
 
-Voi moi event:
+```bash
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT batch_id, started_at, finished_at, status, duration_seconds, dq_issue_count FROM ops.batch_runs ORDER BY batch_id DESC LIMIT 10;"
+```
 
-1. Append event goc vao `raw.cdc_events`.
-2. Upsert/delete dong hien tai vao `clean.customers` hoac `clean.orders`.
-3. Goi function mart incremental:
-   - `mart.on_customer_change(...)`
-   - `mart.on_order_change(...)`
-4. Commit DB transaction.
-5. Commit Kafka offset.
+Check PostgreSQL DLQ:
 
-Transform chinh:
+```bash
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT failed_event_id, source_topic, source_offset, retry_count, error_message, failed_at FROM ops.failed_events ORDER BY failed_event_id DESC LIMIT 20;"
+```
 
-- Customer:
-  - trim `full_name`
-  - lowercase `email`
-  - sinh `email_domain`
-  - chuan hoa `phone`
-  - chuan hoa `country`, neu thieu thi thanh `UNKNOWN`
-- Order:
-  - ep `quantity` ve so nguyen khong am
-  - parse `unit_price` thanh Decimal
-  - tinh `total_amount = quantity * unit_price`
-  - uppercase `status`
+Notes:
 
-Routing theo Debezium `op`:
+- `fake-data` may generate poison orders to test DLQ.
+- Those bad orders intentionally cause numeric overflow and go to `cdc.failed_events`.
 
-- `c`, `r`, `u`: upsert vao clean.
-- `d`: delete khoi clean.
-- moi event deu append vao raw.
+## MongoDB Flow
 
-Neu xu ly event loi, consumer se retry theo cau hinh:
+Start/re-run fake NoSQL data:
+
+```bash
+docker compose up -d --build --force-recreate fake-mongo-data
+docker compose logs -f fake-mongo-data
+```
+
+Check Debezium MongoDB connector:
+
+```bash
+curl http://localhost:8083/connectors/mongodb-source-connector/status
+```
+
+Check MongoDB source:
+
+```bash
+docker compose exec mongodb sh -c 'mongosh -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin "$MONGO_INITDB_DATABASE" --eval "printjson({customer_profiles: db.customer_profiles.countDocuments(), product_reviews: db.product_reviews.countDocuments(), click_events: db.click_events.countDocuments()})"'
+```
+
+Check MongoDB target raw/clean/mart:
+
+```bash
+docker compose exec mongodb-target sh -c 'mongosh -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin "$MONGO_INITDB_DATABASE" --eval "printjson({raw_profiles: db.raw_customer_profiles.countDocuments(), clean_profiles: db.clean_customer_profiles.countDocuments(), raw_reviews: db.raw_product_reviews.countDocuments(), clean_reviews: db.clean_product_reviews.countDocuments(), raw_clicks: db.raw_click_events.countDocuments(), clean_clicks: db.clean_click_events.countDocuments(), mart_product: db.mart_product_review_summary.countDocuments(), mart_customer: db.mart_customer_engagement_summary.countDocuments(), mart_country: db.mart_country_profile_summary.countDocuments(), failed_events: db.ops_failed_events.countDocuments()})"'
+```
+
+Check clean samples:
+
+```bash
+docker compose exec mongodb-target sh -c 'mongosh -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin "$MONGO_INITDB_DATABASE" --eval "db.clean_customer_profiles.findOne(); db.clean_product_reviews.findOne(); db.clean_click_events.findOne();"'
+```
+
+Run MongoDB batch:
+
+```bash
+docker compose exec airflow python -u /opt/airflow/batch/batch_mongo/mongo_batch.py
+```
+
+Check MongoDB batch log:
+
+```bash
+docker compose exec mongodb-target sh -c 'mongosh -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin "$MONGO_INITDB_DATABASE" --eval "db.ops_batch_runs.find().sort({started_at:-1}).limit(5).forEach(printjson);"'
+```
+
+## Object Store / MinIO Flow
+
+Source buckets:
 
 ```text
-MAX_RETRIES=3
-DLQ_TOPIC=cdc.failed_events
+raw-images
+raw-videos
+raw-audio
+raw-documents
 ```
 
-Sau khi qua so lan retry, event loi duoc:
-
-1. Publish sang Kafka topic `cdc.failed_events`.
-2. Ghi metadata loi vao `ops.failed_events`.
-3. Commit Kafka offset de consumer khong bi ket mai o mot bad event.
-
-## 5. Mart Logic
-
-`mart.daily_revenue` tong hop theo:
+Target buckets:
 
 ```text
-order_day + country
+clean-images
+clean-videos
+clean-audio
+clean-documents
+quarantine
 ```
 
-Chi tinh order co:
+List source and target:
 
-```sql
-status <> 'CANCELLED'
+```bash
+docker compose run --rm --entrypoint sh minio-init -c 'mc alias set source http://minio-source:9000 "$MINIO_SOURCE_ROOT_USER" "$MINIO_SOURCE_ROOT_PASSWORD" >/dev/null && mc ls --recursive source'
+docker compose run --rm --entrypoint sh minio-init -c 'mc alias set target http://minio-target:9000 "$MINIO_TARGET_ROOT_USER" "$MINIO_TARGET_ROOT_PASSWORD" >/dev/null && mc ls --recursive target'
 ```
 
-Metrics:
+Upload test object to source:
 
-- `total_orders = COUNT(*)`
-- `total_items = SUM(quantity)`
-- `total_revenue = SUM(total_amount)`
-
-`mart.customer_summary` tong hop theo customer:
-
-- `total_orders = COUNT(order)`
-- `total_spent = SUM(total_amount)` voi order khong `CANCELLED`
-- `last_order_date = MAX(order_date)`
-
-Mart realtime dung incremental update de nhanh. Ngoai ra co:
-
-```sql
-SELECT mart.refresh_all();
+```bash
+docker compose run --rm --entrypoint sh minio-init -c 'mc alias set source http://minio-source:9000 "$MINIO_SOURCE_ROOT_USER" "$MINIO_SOURCE_ROOT_PASSWORD" >/dev/null && echo demo >/tmp/object-test.txt && mc cp /tmp/object-test.txt source/raw-documents/object-test.txt && mc ls source/raw-documents'
 ```
 
-Function nay rebuild toan bo `mart.daily_revenue` va `mart.customer_summary` tu `clean`, dung cho batch reconciliation.
+Check object Kafka topic:
 
-## 6. Airflow + Spark Batch
+```bash
+docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --list | grep object.events
+```
 
-Batch khong thay the realtime. No chay song song de reconcile va kiem tra du lieu dinh ky.
+Read object events:
 
-DAG:
+```bash
+docker compose exec kafka kafka-console-consumer \
+  --bootstrap-server kafka:29092 \
+  --topic object.events \
+  --from-beginning \
+  --max-messages 5
+```
+
+Check object producer/consumer logs:
+
+```bash
+docker compose logs --tail=100 object-event-producer
+docker compose logs --tail=100 object-sink-consumer
+```
+
+Check object metadata and mart:
+
+```bash
+docker compose exec mongodb-target sh -c 'mongosh -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin "$MONGO_INITDB_DATABASE" --eval "printjson({raw_object_events: db.raw_object_events.countDocuments(), clean_object_metadata: db.clean_object_metadata.countDocuments(), active_objects: db.clean_object_metadata.countDocuments({status:\"ACTIVE\"}), missing_objects: db.clean_object_metadata.countDocuments({status:\"MISSING\"}), mart_by_type: db.mart_object_summary_by_type.countDocuments(), mart_by_day: db.mart_object_summary_by_day.countDocuments(), storage_summary: db.mart_object_storage_summary.countDocuments(), failed_events: db.ops_object_failed_events.countDocuments()})"'
+```
+
+View object metadata:
+
+```bash
+docker compose exec mongodb-target sh -c 'mongosh -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin "$MONGO_INITDB_DATABASE" --eval "db.clean_object_metadata.find().sort({ingested_at:-1}).limit(5).forEach(printjson)"'
+```
+
+View object mart:
+
+```bash
+docker compose exec mongodb-target sh -c 'mongosh -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin "$MONGO_INITDB_DATABASE" --eval "db.mart_object_summary_by_type.find().forEach(printjson); db.mart_object_summary_by_day.find().sort({ingested_day:-1}).limit(5).forEach(printjson); db.mart_object_storage_summary.find().forEach(printjson)"'
+```
+
+Run object batch:
+
+```bash
+docker compose exec airflow python -u /opt/airflow/batch/batch_object/object_batch.py
+```
+
+Check object batch log:
+
+```bash
+docker compose exec mongodb-target sh -c 'mongosh -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin "$MONGO_INITDB_DATABASE" --eval "db.ops_object_batch_runs.find().sort({started_at:-1}).limit(5).forEach(printjson)"'
+```
+
+Object batch behavior:
+
+- If metadata exists but the target file is deleted, batch marks metadata as `MISSING`.
+- Object mart only counts `status = ACTIVE`.
+- Metadata is kept for audit.
+
+## Clean / Transform Rules
+
+**PostgreSQL**
+
+- Customer: trim name, lowercase email, extract email domain, normalize phone, normalize country.
+- Order: cast quantity, parse price, compute `total_amount`, uppercase status.
+
+**MongoDB**
+
+- Profiles: normalize country, nested preferences, nested loyalty, devices list.
+- Reviews: normalize ids, rating range `0..5`, uppercase status, clean tags.
+- Clicks: normalize ids, uppercase event type/referrer/page.
+
+**Object**
+
+- Validate `size_bytes > 0`.
+- Normalize `media_type`: `image`, `video`, `audio`, `document`.
+- Route to clean bucket by media type.
+- Normalize extension/content type/source type.
+- Track `ACTIVE` or `MISSING`.
+- Mart counts only `ACTIVE` objects.
+
+## Batch DAGs
+
+Airflow DAGs:
 
 ```text
 cdc_batch_reconcile_3h
+mongo_batch_reconcile_3h
+object_batch_reconcile_3h
 ```
 
-Lich chay:
+Check:
+
+```bash
+docker compose exec airflow airflow dags list
+```
+
+Each DAG runs every 3 hours:
 
 ```text
 0 */3 * * *
 ```
 
-Tuc la moi 3 tieng.
+Manual runs:
 
-Batch job lam:
-
-1. Start Spark local session.
-2. Goi `SELECT mart.refresh_all();`.
-3. Tinh data-quality metrics.
-4. Ghi ket qua vao `ops.batch_runs`.
-
-Airflow UI:
-
-```text
-http://localhost:8081
-Dang nhap bang AIRFLOW_ADMIN_USERNAME / AIRFLOW_ADMIN_PASSWORD trong `.env`.
-```
-
-Chay batch thu cong bang terminal:
-
-```powershell
+```bash
 docker compose exec airflow python -u /opt/airflow/batch/batch_postgres/spark_batch.py
+docker compose exec airflow python -u /opt/airflow/batch/batch_mongo/mongo_batch.py
+docker compose exec airflow python -u /opt/airflow/batch/batch_object/object_batch.py
 ```
 
-Kiem tra batch log:
+## Superset
 
-```powershell
-docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT batch_id, started_at, finished_at, status, duration_seconds, dq_issue_count FROM ops.batch_runs ORDER BY batch_id DESC LIMIT 10;"
-```
-
-Status co the gap:
-
-- `SUCCESS`: batch chay xong va khong co data-quality issue.
-- `SUCCESS_WITH_WARNINGS`: batch chay xong nhung co issue, vi du `UNKNOWN` country hoac order khong join duoc customer.
-- `FAILED`: batch loi.
-
-## 7. SQL Queue / Dead Letter Queue
-
-Pipeline SQL hien dung Kafka lam queue chinh cho CDC topics:
-
-```text
-dbserver1.public.customers
-dbserver1.public.orders
-```
-
-Them vao do la dead-letter queue:
-
-```text
-cdc.failed_events
-```
-
-Topic nay nhan cac CDC event ma `consumer.py` khong xu ly duoc sau `MAX_RETRIES`.
-
-Fake-data mac dinh tao 4 poison orders trong 5 phut de test DLQ:
-
-```text
-POISON_EVENTS=4
-product_name=[DLQ_TEST] Overflow Order
-```
-
-Nhung order nay hop le o source DB, nhung co `quantity * unit_price` qua lon nen khi consumer ghi vao
-`clean.orders.total_amount NUMERIC(14,2)` se loi numeric overflow. Consumer retry roi dua event vao DLQ.
-
-Kiem tra topic:
-
-```powershell
-docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --list
-```
-
-Doc failed events tu Kafka:
-
-```powershell
-docker compose exec kafka kafka-console-consumer `
-  --bootstrap-server kafka:29092 `
-  --topic cdc.failed_events `
-  --from-beginning `
-  --max-messages 5
-```
-
-Kiem tra failed events trong target DB:
-
-```powershell
-docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT failed_event_id, source_topic, source_offset, retry_count, error_message, failed_at FROM ops.failed_events ORDER BY failed_event_id DESC LIMIT 20;"
-```
-
-## 8. Superset Dashboard
-
-Mo Superset:
+Superset is currently used for PostgreSQL mart:
 
 ```text
 http://localhost:8088
 ```
 
-Khoi tao Superset lan dau:
-
-```powershell
-docker compose exec superset superset db upgrade
-docker compose exec superset sh -c 'superset fab create-admin \
-  --username "$SUPERSET_ADMIN_USERNAME" \
-  --firstname "$SUPERSET_ADMIN_FIRSTNAME" \
-  --lastname "$SUPERSET_ADMIN_LASTNAME" \
-  --email "$SUPERSET_ADMIN_EMAIL" \
-  --password "$SUPERSET_ADMIN_PASSWORD"'
-docker compose exec superset superset init
-```
-
-Khi tao database connection trong Superset, neu wizard khong cho dan URL thi nhap tung field:
+Connect to PostgreSQL target from inside Superset:
 
 ```text
 HOST: postgres-target
 PORT: 5432
-DATABASE NAME: targetdb
-USERNAME: TARGET_DB_USER trong `.env`
-PASSWORD: TARGET_DB_PASSWORD trong `.env`
-DISPLAY NAME: targetdb
-SSL: off
-SSH Tunnel: off
+DATABASE: targetdb
+USERNAME: TARGET_DB_USER from .env
+PASSWORD: TARGET_DB_PASSWORD from .env
 ```
 
-Dataset nen them:
+Recommended datasets:
 
-- `mart.daily_revenue`
-- `mart.customer_summary`
-- `ops.batch_runs`
-
-Chart goi y cho business dashboard:
-
-- Big Number: `SUM(total_revenue)` tu `mart.daily_revenue`
-- Bar Chart: doanh thu theo quoc gia tu `mart.daily_revenue`
-- Bar Chart hoac Table: top khach hang tu `mart.customer_summary`
-- Time-series Line Chart: doanh thu theo ngay neu du lieu co nhieu `order_day`
-
-Chart goi y cho batch monitoring:
-
-- Latest batch status tu `ops.batch_runs`
-- Batch duration trend tu `ops.batch_runs`
-- Batch run history table tu `ops.batch_runs`
-- Data-quality issue count tu `ops.batch_runs.dq_issue_count`
-
-## 9. Data Quality Queries
-
-Customer thieu country:
-
-```powershell
-docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT id, full_name, email, country FROM clean.customers WHERE country = 'UNKNOWN' ORDER BY id;"
+```text
+mart.daily_revenue
+mart.customer_summary
+ops.batch_runs
 ```
 
-Order khong join duoc customer:
+MongoDB and Object metadata are kept in MongoDB target. Superset does not read MongoDB directly in this lightweight setup.
 
-```powershell
-docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT o.id, o.customer_id, o.total_amount FROM clean.orders o LEFT JOIN clean.customers c ON c.id = o.customer_id WHERE c.id IS NULL;"
-```
+## Full Health Check
 
-Recompute revenue truc tiep tu clean de doi chieu mart:
-
-```powershell
-docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT o.order_date::date AS order_day, COALESCE(NULLIF(c.country, ''), 'UNKNOWN') AS country, COUNT(*) AS total_orders, SUM(o.quantity) AS total_items, SUM(o.total_amount) AS total_revenue FROM clean.orders o LEFT JOIN clean.customers c ON c.id = o.customer_id WHERE o.status <> 'CANCELLED' GROUP BY o.order_date::date, COALESCE(NULLIF(c.country, ''), 'UNKNOWN') ORDER BY order_day DESC, country;"
-```
-
-Reconcile mart thu cong:
-
-```powershell
-docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT mart.refresh_all();"
-```
-
-## 10. Chay Lai Fake Data
-
-```powershell
-docker compose up -d --build --force-recreate fake-data
-docker compose logs -f fake-data
-```
-
-Mac dinh `fake-data` tao 4 event loi co chu dich trong 5 phut de test `cdc.failed_events`.
-Neu khong muon tao poison events, set:
-
-```yaml
-POISON_EVENTS: "0"
-```
-
-Theo doi consumer:
-
-```powershell
-docker compose logs -f consumer
-```
-
-## 11. Dung / Don Dep
-
-Dung services, giu du lieu trong named volumes:
-
-```powershell
-docker compose down
-```
-
-Lenh nay giu lai:
-
-- PostgreSQL source/target data.
-- MongoDB source/target data.
-- Kafka/Zookeeper data.
-- Airflow metadata/logs.
-- Superset user, database connection, dataset, chart, dashboard.
-
-Chay lai ma khong mat du lieu:
-
-```powershell
-docker compose up -d
-```
-
-Dung va xoa volume:
-
-```powershell
-docker compose down -v
-```
-
-Lenh `down -v` se xoa du lieu DB, Kafka topics, Airflow metadata va Superset dashboard, dung khi muon lam lai tu dau.
-
-## 12. Troubleshooting
-
-Connector khong `RUNNING`:
-
-```powershell
-docker compose logs connect
-docker compose logs connector-init
-```
-
-Consumer khong thay event:
-
-```powershell
-docker compose logs consumer
+```bash
+docker compose ps
+curl http://localhost:8083/connectors/ecommerce-source-connector/status
+curl http://localhost:8083/connectors/mongodb-source-connector/status
 docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --list
+docker compose exec airflow airflow dags list
 ```
 
-Airflow khong thay DAG:
+PostgreSQL:
 
-```powershell
-docker compose logs airflow
+```bash
+docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT 'raw_events' AS metric, COUNT(*) FROM raw.cdc_events UNION ALL SELECT 'clean_customers', COUNT(*) FROM clean.customers UNION ALL SELECT 'clean_orders', COUNT(*) FROM clean.orders UNION ALL SELECT 'mart_daily_revenue', COUNT(*) FROM mart.daily_revenue UNION ALL SELECT 'mart_customer_summary', COUNT(*) FROM mart.customer_summary UNION ALL SELECT 'failed_events', COUNT(*) FROM ops.failed_events;"
 ```
 
-Superset khong connect duoc target DB:
+MongoDB:
 
-- Trong Superset container, dung host `postgres-target`, port `5432`.
-- Tu may host Windows, Postgres target la `localhost:5433`.
+```bash
+docker compose exec mongodb-target sh -c 'mongosh -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin "$MONGO_INITDB_DATABASE" --eval "printjson({clean_profiles: db.clean_customer_profiles.countDocuments(), clean_reviews: db.clean_product_reviews.countDocuments(), clean_clicks: db.clean_click_events.countDocuments(), mart_product: db.mart_product_review_summary.countDocuments(), mart_customer: db.mart_customer_engagement_summary.countDocuments(), mart_country: db.mart_country_profile_summary.countDocuments(), failed_events: db.ops_failed_events.countDocuments()})"'
+```
 
-Lam lai toan bo:
+Object:
 
-```powershell
+```bash
+docker compose exec mongodb-target sh -c 'mongosh -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin "$MONGO_INITDB_DATABASE" --eval "printjson({clean_object_metadata: db.clean_object_metadata.countDocuments(), active_objects: db.clean_object_metadata.countDocuments({status:\"ACTIVE\"}), missing_objects: db.clean_object_metadata.countDocuments({status:\"MISSING\"}), failed_events: db.ops_object_failed_events.countDocuments()})"'
+```
+
+## Troubleshooting
+
+Rebuild service after requirements change:
+
+```bash
+docker compose up -d --build --force-recreate airflow
+docker compose up -d --build --force-recreate object-sink-consumer
+```
+
+Connector not running:
+
+```bash
+docker compose logs --tail=200 connect
+docker compose logs --tail=200 connector-init
+docker compose logs --tail=200 mongo-connector-init
+```
+
+Consumer not processing:
+
+```bash
+docker compose logs --tail=200 consumer
+docker compose logs --tail=200 mongo-sink-consumer
+docker compose logs --tail=200 object-sink-consumer
+```
+
+Object not copied:
+
+```bash
+docker compose logs --tail=200 object-event-producer
+docker compose logs --tail=200 object-sink-consumer
+docker compose run --rm --entrypoint sh minio-init -c 'mc alias set source http://minio-source:9000 "$MINIO_SOURCE_ROOT_USER" "$MINIO_SOURCE_ROOT_PASSWORD" >/dev/null && mc ls --recursive source'
+docker compose run --rm --entrypoint sh minio-init -c 'mc alias set target http://minio-target:9000 "$MINIO_TARGET_ROOT_USER" "$MINIO_TARGET_ROOT_PASSWORD" >/dev/null && mc ls --recursive target'
+```
+
+Airflow missing dependency after code update:
+
+```bash
+docker compose build airflow
+docker compose up -d --force-recreate airflow
+```
+
+Reset all data:
+
+```bash
 docker compose down -v
 docker compose up -d --build
 ```
