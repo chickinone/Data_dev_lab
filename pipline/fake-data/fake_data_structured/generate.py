@@ -37,7 +37,10 @@ COUNTRY_RAW = [
 
 STATUS_FLOW = ["NEW", "PAID", "SHIPPED", "DELIVERED"]
 POISON_PRODUCT = "[DLQ_TEST] Overflow Order"
-POISON_EVENTS = int(os.getenv("POISON_EVENTS", "4"))
+POISON_EVENTS = int(required_env("POISON_EVENTS"))
+FAKE_DATA_DURATION_SECONDS = int(required_env("FAKE_DATA_DURATION_SECONDS"))
+FAKE_DATA_SLEEP_MIN_SECONDS = float(required_env("FAKE_DATA_SLEEP_MIN_SECONDS"))
+FAKE_DATA_SLEEP_MAX_SECONDS = float(required_env("FAKE_DATA_SLEEP_MAX_SECONDS"))
 
 
 def connect():
@@ -171,7 +174,7 @@ def delete_order(cur):
 
 def main():
     start_time = time.time()
-    end_time = start_time + 60 * 5
+    end_time = start_time + FAKE_DATA_DURATION_SECONDS
     conn = connect()
     cur = conn.cursor()
 
@@ -207,9 +210,9 @@ def main():
             fn(cur)
         except Exception as exc:
             print(f"[fake-data] action error: {exc}", flush=True)
-        time.sleep(random.uniform(0.5, 2.0))
+        time.sleep(random.uniform(FAKE_DATA_SLEEP_MIN_SECONDS, FAKE_DATA_SLEEP_MAX_SECONDS))
     
-    print("[fake-data] 5 minutes done. Stopping.", flush=True)  
+    print("[fake-data] done. Stopping.", flush=True)
 
 
 if __name__ == "__main__":

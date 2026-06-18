@@ -10,17 +10,18 @@ import psycopg2
 from psycopg2.extras import Json
 from confluent_kafka import Consumer, KafkaError, Producer, TopicPartition
 
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
-TOPIC_PREFIX    = os.getenv("TOPIC_PREFIX",    "dbserver1")
-DLQ_TOPIC       = os.getenv("DLQ_TOPIC",       "cdc.failed_events")
-MAX_RETRIES     = int(os.getenv("MAX_RETRIES", "3"))
-
-
 def required_env(name):
     value = os.getenv(name)
     if value is None or value == "":
         sys.exit(f"missing required environment variable: {name}")
     return value
+
+
+KAFKA_BOOTSTRAP = required_env("KAFKA_BOOTSTRAP")
+TOPIC_PREFIX    = required_env("TOPIC_PREFIX")
+DLQ_TOPIC       = required_env("DLQ_TOPIC")
+CDC_CONSUMER_GROUP = required_env("CDC_CONSUMER_GROUP")
+MAX_RETRIES     = int(required_env("MAX_RETRIES"))
 
 
 DB = dict(
@@ -288,7 +289,7 @@ def build_failed_event(msg, exc, retry_count):
         "error_message": str(exc),
         "retry_count": retry_count,
         "failed_at": datetime.now(timezone.utc).isoformat(),
-        "consumer_group": "cdc-consumer",
+        "consumer_group": CDC_CONSUMER_GROUP,
     }
 
 
@@ -418,7 +419,7 @@ def main():
 
     consumer = Consumer({
         "bootstrap.servers":                  KAFKA_BOOTSTRAP,
-        "group.id":                           "cdc-consumer",
+        "group.id":                           CDC_CONSUMER_GROUP,
         "auto.offset.reset":                  "earliest",
         "enable.auto.commit":                 False,
         "topic.metadata.refresh.interval.ms": 10_000,

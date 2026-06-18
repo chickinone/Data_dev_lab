@@ -17,7 +17,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./source-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./db/postgres_source/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -34,12 +34,81 @@ services:
     ports:
       - "5433:5432"          
     volumes:
-      - ./target-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./db/postgres_target/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
       retries: 12
+
+  mongodb:
+    image: mongo:7
+    container_name: mongodb
+    entrypoint:
+      - bash
+      - -c
+      - |
+        printf '%s' "$${MONGO_REPLICA_SET_KEY}" > /data/mongodb-keyfile
+        chmod 400 /data/mongodb-keyfile
+        chown mongodb:mongodb /data/mongodb-keyfile
+        exec docker-entrypoint.sh mongod --replSet "$${MONGO_REPLICA_SET}" --bind_ip_all --keyFile /data/mongodb-keyfile
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGO_DATABASE}
+      MONGO_REPLICA_SET: ${MONGO_REPLICA_SET}
+      MONGO_REPLICA_SET_KEY: ${MONGO_REPLICA_SET_KEY}
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet -u \"$${MONGO_INITDB_ROOT_USERNAME}\" -p \"$${MONGO_INITDB_ROOT_PASSWORD}\" --authenticationDatabase admin --eval \"db.adminCommand('ping').ok\" | grep 1"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  mongo-init:
+    image: mongo:7
+    container_name: mongo-init
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_REPLICA_SET: ${MONGO_REPLICA_SET}
+    entrypoint:
+      - bash
+      - -c
+      - |
+        mongosh --host mongodb:27017 \
+          -u "$${MONGO_ROOT_USERNAME}" \
+          -p "$${MONGO_ROOT_PASSWORD}" \
+          --authenticationDatabase admin \
+          --eval "try { rs.status().ok } catch (e) { rs.initiate({_id: '$${MONGO_REPLICA_SET}', members: [{ _id: 0, host: 'mongodb:27017' }]}) }"
+    restart: "no"
+
+  mongodb-target:
+    image: mongo:7
+    container_name: mongodb-target
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_TARGET_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_TARGET_ROOT_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGO_TARGET_DATABASE}
+    ports:
+      - "27018:27017"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet -u \"$${MONGO_INITDB_ROOT_USERNAME}\" -p \"$${MONGO_INITDB_ROOT_PASSWORD}\" --authenticationDatabase admin --eval \"db.adminCommand('ping').ok\" | grep 1"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 24
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
@@ -159,8 +228,63 @@ services:
         echo "connector-init finished.";
     restart: "no"
 
+  mongo-connector-init:
+    image: curlimages/curl:8.10.1
+    container_name: mongo-connector-init
+    depends_on:
+      connect:
+        condition: service_started
+      mongo-init:
+        condition: service_completed_successfully
+    environment:
+      MONGO_HOST: ${MONGO_HOST}
+      MONGO_PORT: ${MONGO_PORT}
+      MONGO_DATABASE: ${MONGO_DATABASE}
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_AUTH_SOURCE: ${MONGO_AUTH_SOURCE}
+      MONGO_REPLICA_SET: ${MONGO_REPLICA_SET}
+      MONGO_TOPIC_PREFIX: ${MONGO_TOPIC_PREFIX}
+      MONGO_DEBEZIUM_CONNECTOR_NAME: ${MONGO_DEBEZIUM_CONNECTOR_NAME}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        echo "Waiting for Kafka Connect REST API...";
+        until [ "$$(curl -s -o /dev/null -w '%{http_code}' http://connect:8083/connectors)" = "200" ]; do
+          sleep 3;
+        done;
+        sleep 5;
+        cat > /tmp/mongo-config.json <<EOF
+        {
+          "name": "$${MONGO_DEBEZIUM_CONNECTOR_NAME}",
+          "config": {
+            "connector.class": "io.debezium.connector.mongodb.MongoDbConnector",
+            "tasks.max": "1",
+            "mongodb.connection.string": "mongodb://$${MONGO_ROOT_USERNAME}:$${MONGO_ROOT_PASSWORD}@$${MONGO_HOST}:$${MONGO_PORT}/?authSource=$${MONGO_AUTH_SOURCE}&replicaSet=$${MONGO_REPLICA_SET}",
+            "topic.prefix": "$${MONGO_TOPIC_PREFIX}",
+            "database.include.list": "$${MONGO_DATABASE}",
+            "collection.include.list": "$${MONGO_DATABASE}.customer_profiles,$${MONGO_DATABASE}.product_reviews,$${MONGO_DATABASE}.click_events",
+            "capture.mode": "change_streams_update_full",
+            "snapshot.mode": "initial",
+            "tombstones.on.delete": "false",
+            "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "key.converter.schemas.enable": "false",
+            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "value.converter.schemas.enable": "false"
+          }
+        }
+        EOF
+        echo "Registering Debezium MongoDB connector...";
+        code=$$(curl -s -o /tmp/mongo-r.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data @/tmp/mongo-config.json http://connect:8083/connectors);
+        echo "HTTP status: $$code (200/201 = created, 409 = already exists)";
+        cat /tmp/mongo-r.json 2>/dev/null || true;
+        echo;
+        echo "mongo-connector-init finished.";
+    restart: "no"
+
   fake-data:
-    build: ./fake-data
+    build: ./fake-data/fake_data_structured
     container_name: fake-data
     depends_on:
       postgres-source:
@@ -172,10 +296,57 @@ services:
       SOURCE_DB_USER: ${SOURCE_DB_USER}
       SOURCE_DB_PASSWORD: ${SOURCE_DB_PASSWORD}
       POISON_EVENTS: ${POISON_EVENTS}
+      FAKE_DATA_DURATION_SECONDS: ${FAKE_DATA_DURATION_SECONDS}
+      FAKE_DATA_SLEEP_MIN_SECONDS: ${FAKE_DATA_SLEEP_MIN_SECONDS}
+      FAKE_DATA_SLEEP_MAX_SECONDS: ${FAKE_DATA_SLEEP_MAX_SECONDS}
     restart: "no"
 
+  fake-mongo-data:
+    build: ./fake-data/fake_data_nosql
+    container_name: fake-mongo-data
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+    environment:
+      MONGO_HOST: ${MONGO_HOST}
+      MONGO_PORT: ${MONGO_PORT}
+      MONGO_DATABASE: ${MONGO_DATABASE}
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_AUTH_SOURCE: ${MONGO_AUTH_SOURCE}
+      MONGO_REPLICA_SET: ${MONGO_REPLICA_SET}
+      MONGO_FAKE_DURATION_SECONDS: ${MONGO_FAKE_DURATION_SECONDS}
+      MONGO_FAKE_SLEEP_MIN_SECONDS: ${MONGO_FAKE_SLEEP_MIN_SECONDS}
+      MONGO_FAKE_SLEEP_MAX_SECONDS: ${MONGO_FAKE_SLEEP_MAX_SECONDS}
+    restart: "no"
+
+  mongo-sink-consumer:
+    build: ./consumers/consumer_mongo
+    container_name: mongo-sink-consumer
+    depends_on:
+      kafka:
+        condition: service_started
+      mongodb-target:
+        condition: service_healthy
+      mongo-connector-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
+      MONGO_TOPIC_PREFIX: ${MONGO_TOPIC_PREFIX}
+      MONGO_DATABASE: ${MONGO_DATABASE}
+      MONGO_TARGET_HOST: ${MONGO_TARGET_HOST}
+      MONGO_TARGET_PORT: ${MONGO_TARGET_PORT}
+      MONGO_TARGET_DATABASE: ${MONGO_TARGET_DATABASE}
+      MONGO_TARGET_ROOT_USERNAME: ${MONGO_TARGET_ROOT_USERNAME}
+      MONGO_TARGET_ROOT_PASSWORD: ${MONGO_TARGET_ROOT_PASSWORD}
+      MONGO_TARGET_AUTH_SOURCE: ${MONGO_TARGET_AUTH_SOURCE}
+      MONGO_SINK_GROUP_ID: ${MONGO_SINK_GROUP_ID}
+      MONGO_DLQ_TOPIC: ${MONGO_DLQ_TOPIC}
+      MAX_RETRIES: ${MAX_RETRIES}
+    restart: unless-stopped
+
   consumer:
-    build: ./consumer
+    build: ./consumers/consumer_postgres
     container_name: consumer
     depends_on:
       postgres-target:
@@ -191,6 +362,7 @@ services:
       TARGET_DB_USER: ${TARGET_DB_USER}
       TARGET_DB_PASSWORD: ${TARGET_DB_PASSWORD}
       DLQ_TOPIC: ${DLQ_TOPIC}
+      CDC_CONSUMER_GROUP: ${CDC_CONSUMER_GROUP}
       MAX_RETRIES: ${MAX_RETRIES}
     restart: unless-stopped
 
@@ -218,6 +390,20 @@ services:
       TARGET_DB_NAME: ${TARGET_DB_NAME}
       TARGET_DB_USER: ${TARGET_DB_USER}
       TARGET_DB_PASSWORD: ${TARGET_DB_PASSWORD}
+      MONGO_BATCH_JOB_NAME: ${MONGO_BATCH_JOB_NAME}
+      MONGO_HOST: ${MONGO_HOST}
+      MONGO_PORT: ${MONGO_PORT}
+      MONGO_DATABASE: ${MONGO_DATABASE}
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_AUTH_SOURCE: ${MONGO_AUTH_SOURCE}
+      MONGO_REPLICA_SET: ${MONGO_REPLICA_SET}
+      MONGO_TARGET_HOST: ${MONGO_TARGET_HOST}
+      MONGO_TARGET_PORT: ${MONGO_TARGET_PORT}
+      MONGO_TARGET_DATABASE: ${MONGO_TARGET_DATABASE}
+      MONGO_TARGET_ROOT_USERNAME: ${MONGO_TARGET_ROOT_USERNAME}
+      MONGO_TARGET_ROOT_PASSWORD: ${MONGO_TARGET_ROOT_PASSWORD}
+      MONGO_TARGET_AUTH_SOURCE: ${MONGO_TARGET_AUTH_SOURCE}
     volumes:
       - ./airflow/dags:/opt/airflow/dags:ro
       - ./batch:/opt/airflow/batch:ro

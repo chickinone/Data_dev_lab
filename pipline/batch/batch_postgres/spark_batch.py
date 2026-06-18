@@ -10,14 +10,15 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 
-JOB_NAME = os.getenv("BATCH_JOB_NAME", "cdc_spark_reconcile")
-
-
 def required_env(name):
     value = os.getenv(name)
     if value is None or value == "":
         sys.exit(f"[spark-batch] missing required environment variable: {name}")
     return value
+
+
+JOB_NAME = required_env("BATCH_JOB_NAME")
+SPARK_MASTER = required_env("SPARK_MASTER")
 
 
 DB = dict(
@@ -172,7 +173,7 @@ def main():
     started = time.time()
     spark = (
         SparkSession.builder.appName(JOB_NAME)
-        .master(os.getenv("SPARK_MASTER", "local[*]"))
+        .master(SPARK_MASTER)
         .config("spark.ui.enabled", "false")
         .getOrCreate()
     )

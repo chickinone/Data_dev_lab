@@ -18,7 +18,7 @@ with DAG(
 ) as dag:
     run_spark_reconcile = BashOperator(
         task_id="run_spark_reconcile",
-        bash_command="python -u /opt/airflow/batch/spark_batch.py",
+        bash_command="python -u /opt/airflow/batch/batch_postgres/spark_batch.py",
         append_env=True,
         env={
             "BATCH_JOB_NAME": os.environ["BATCH_JOB_NAME"],

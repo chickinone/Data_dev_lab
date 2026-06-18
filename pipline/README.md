@@ -26,12 +26,39 @@ Superset
   -> doc mart.* va ops.batch_runs
 ```
 
+## Folder Layout
+
+```text
+pipline/
+  db/
+    postgres_source/
+    postgres_target/
+  connectors/
+    debezium_postgres/
+  fake-data/
+    fake_data_structured/
+    fake_data_nosql/
+    fake_data_unstructured/
+  consumers/
+    consumer_postgres/
+    consumer_mongo/
+  batch/
+    batch_postgres/
+    batch_mongo/
+  airflow/
+    dags/
+```
+
 ## Services
 
 | Service | Port | Vai tro |
 | --- | ---: | --- |
 | `postgres-source` | `5432` | DB nguon, chua `public.customers`, `public.orders` |
 | `postgres-target` | `5433` | DB dich, chua `raw`, `clean`, `mart`, `ops` |
+| `mongodb` | `27017` | NoSQL source, chua document fake cho CDC/stream ve sau |
+| `mongodb-target` | `27018` | NoSQL target, nhan document realtime tu Kafka |
+| `fake-mongo-data` | - | Sinh document fake MongoDB rieng voi fake-data structured |
+| `mongo-sink-consumer` | - | Doc Kafka topics MongoDB va ghi sang `mongodb-target` |
 | `kafka` | `9092` | Kafka broker |
 | `connect` | `8083` | Kafka Connect / Debezium |
 | `kafka-ui` | `8080` | UI xem Kafka topics |
@@ -53,7 +80,7 @@ Theo doi logs chinh:
 
 ```powershell
 docker compose logs -f connector-init
-docker compose logs -f fake-data consumer
+docker compose logs -f fake-data fake-mongo-data consumer
 ```
 
 Kiem tra container:
@@ -94,6 +121,83 @@ Kafka UI:
 http://localhost:8080
 ```
 
+## 2.1 MongoDB Fake Data
+
+`fake-mongo-data` la generator rieng cho NoSQL, khong dung chung voi `fake-data`
+structured/PostgreSQL. Service nay ghi vao MongoDB database cau hinh boi
+`MONGO_DATABASE` trong `.env`.
+
+Collections duoc sinh:
+
+- `customer_profiles`: profile document mo rong theo customer.
+- `product_reviews`: review document co rating/status/tags.
+- `click_events`: su kien hanh vi dang append-only.
+
+Realtime MongoDB flow:
+
+```text
+fake-mongo-data
+  -> mongodb (source)
+  -> Debezium MongoDB connector
+  -> Kafka topics mongodb.ecommerce_nosql.*
+  -> mongo-sink-consumer
+  -> mongodb-target raw_* va clean_* collections
+```
+
+`mongodb-target` luu rieng hai lop:
+
+- `raw_customer_profiles`, `raw_product_reviews`, `raw_click_events`: document goc tu MongoDB source + `_cdc`.
+- `clean_customer_profiles`, `clean_product_reviews`, `clean_click_events`: document da trim/normalize/validate nhe + `_cdc`.
+- `mart_product_review_summary`, `mart_customer_engagement_summary`, `mart_country_profile_summary`: aggregate realtime/batch.
+- `ops_failed_events`, `ops_batch_runs`: log loi va batch run cua MongoDB pipeline.
+
+Kiem tra nhanh:
+
+```powershell
+docker compose exec mongodb sh -c 'mongosh \
+  -u "$MONGO_INITDB_ROOT_USERNAME" \
+  -p "$MONGO_INITDB_ROOT_PASSWORD" \
+  --authenticationDatabase admin \
+  "$MONGO_INITDB_DATABASE" \
+  --eval "db.customer_profiles.countDocuments(); db.product_reviews.countDocuments(); db.click_events.countDocuments();"'
+```
+
+Kiem tra Kafka topics MongoDB:
+
+```powershell
+docker compose exec kafka kafka-topics `
+  --bootstrap-server kafka:29092 `
+  --list
+```
+
+Kiem tra du lieu da sink sang MongoDB target:
+
+```powershell
+docker compose exec mongodb-target sh -c 'mongosh \
+  -u "$MONGO_INITDB_ROOT_USERNAME" \
+  -p "$MONGO_INITDB_ROOT_PASSWORD" \
+  --authenticationDatabase admin \
+  "$MONGO_INITDB_DATABASE" \
+  --eval "printjson({raw_profiles: db.raw_customer_profiles.countDocuments(), clean_profiles: db.clean_customer_profiles.countDocuments(), raw_reviews: db.raw_product_reviews.countDocuments(), clean_reviews: db.clean_product_reviews.countDocuments(), raw_clicks: db.raw_click_events.countDocuments(), clean_clicks: db.clean_click_events.countDocuments()})"'
+```
+
+Kiem tra MongoDB mart:
+
+```powershell
+docker compose exec mongodb-target sh -c 'mongosh \
+  -u "$MONGO_INITDB_ROOT_USERNAME" \
+  -p "$MONGO_INITDB_ROOT_PASSWORD" \
+  --authenticationDatabase admin \
+  "$MONGO_INITDB_DATABASE" \
+  --eval "printjson({product_summary: db.mart_product_review_summary.countDocuments(), customer_summary: db.mart_customer_engagement_summary.countDocuments(), country_summary: db.mart_country_profile_summary.countDocuments()})"'
+```
+
+Chay MongoDB batch reconcile thu cong:
+
+```powershell
+docker compose exec airflow python -u /opt/airflow/batch/batch_mongo/mongo_batch.py
+```
+
 ## 3. Target DB Layers
 
 Target DB co 4 schema chinh:
@@ -131,7 +235,7 @@ docker compose exec postgres-target psql -U postgres -d targetdb -c "SELECT * FR
 
 ## 4. Realtime Consumer Logic
 
-`consumer/consumer.py` doc CDC event tu cac topic:
+`consumers/consumer_postgres/consumer.py` doc CDC event tu cac topic:
 
 - `dbserver1.public.customers`
 - `dbserver1.public.orders`
@@ -248,7 +352,7 @@ Dang nhap bang AIRFLOW_ADMIN_USERNAME / AIRFLOW_ADMIN_PASSWORD trong `.env`.
 Chay batch thu cong bang terminal:
 
 ```powershell
-docker compose exec airflow python -u /opt/airflow/batch/spark_batch.py
+docker compose exec airflow python -u /opt/airflow/batch/batch_postgres/spark_batch.py
 ```
 
 Kiem tra batch log:
